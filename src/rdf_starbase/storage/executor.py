@@ -21,7 +21,7 @@ from rdf_starbase.sparql.ast import (
     Term,
     # Property path types
     PropertyPath, PathIRI, PathSequence, PathAlternative,
-    PathInverse, PathMod, PathNegatedPropertySet, PropertyPathModifier,
+    PathInverse, PathMod, PathNegatedPropertySet, PathFixedLength, PropertyPathModifier,
     # Pattern types
     MinusPattern, OptionalPattern, UnionPattern,
     # Aggregate types
@@ -562,6 +562,8 @@ class StorageExecutor:
             return self._execute_path_inverse(path, start_id, end_id, prefixes)
         elif isinstance(path, PathMod):
             return self._execute_path_mod(path, start_id, end_id, prefixes)
+        elif isinstance(path, PathFixedLength):
+            return self._execute_path_fixed_length(path, start_id, end_id, prefixes)
         elif isinstance(path, PathNegatedPropertySet):
             return self._execute_path_negated(path, start_id, end_id, prefixes)
         else:
@@ -777,6 +779,113 @@ class StorageExecutor:
         
         return reachable
     
+    def _execute_path_fixed_length(
+        self,
+        path: PathFixedLength,
+        start_id: Optional[int],
+        end_id: Optional[int],
+        prefixes: dict[str, str]
+    ) -> pl.DataFrame:
+        """
+        Execute a fixed-length property path (path{n}, path{n,m}, path{n,}).
+        
+        Examples:
+            foaf:knows{2}   - exactly 2 hops
+            foaf:knows{2,4} - 2 to 4 hops
+            foaf:knows{2,}  - 2 or more hops
+        """
+        min_len = path.min_length
+        max_len = path.max_length
+        
+        # If max_len is None (unbounded), use a reasonable limit
+        effective_max = max_len if max_len is not None else min_len + 10
+        
+        # Get single-step edges
+        edges = self._execute_path(path.path, None, None, prefixes)
+        
+        if len(edges) == 0:
+            return pl.DataFrame({
+                "start": pl.Series([], dtype=pl.UInt64),
+                "end": pl.Series([], dtype=pl.UInt64)
+            })
+        
+        # Build paths of each length from min_len to effective_max
+        result_dfs = []
+        
+        # Start with length 1
+        if min_len <= 1 <= effective_max:
+            length_1 = edges.clone()
+            if start_id is not None:
+                length_1 = length_1.filter(pl.col("start") == start_id)
+            if end_id is not None:
+                length_1 = length_1.filter(pl.col("end") == end_id)
+            if min_len <= 1:
+                result_dfs.append(length_1)
+        
+        # For paths of length > 1, we need to compose edges
+        if effective_max >= 2:
+            # current_paths holds paths of the current length
+            current_paths = edges.clone()
+            
+            for length in range(2, effective_max + 1):
+                # Extend paths by one step: (a, b) + (b, c) => (a, c)
+                extended = current_paths.join(
+                    edges.rename({"start": "_mid", "end": "_new_end"}),
+                    left_on="end",
+                    right_on="_mid",
+                    how="inner"
+                ).select([
+                    pl.col("start"),
+                    pl.col("_new_end").alias("end")
+                ]).unique()
+                
+                current_paths = extended
+                
+                if len(current_paths) == 0:
+                    break  # No more paths to extend
+                
+                # If this length is within our range, add to results
+                if min_len <= length:
+                    filtered = current_paths.clone()
+                    if start_id is not None:
+                        filtered = filtered.filter(pl.col("start") == start_id)
+                    if end_id is not None:
+                        filtered = filtered.filter(pl.col("end") == end_id)
+                    result_dfs.append(filtered)
+        
+        # Handle unbounded case: continue until fixed point or max iterations
+        if max_len is None and len(current_paths) > 0:
+            for _ in range(10):  # Additional iterations for unbounded
+                extended = current_paths.join(
+                    edges.rename({"start": "_mid", "end": "_new_end"}),
+                    left_on="end",
+                    right_on="_mid",
+                    how="inner"
+                ).select([
+                    pl.col("start"),
+                    pl.col("_new_end").alias("end")
+                ]).unique()
+                
+                if len(extended) == 0:
+                    break
+                
+                current_paths = extended
+                
+                filtered = current_paths.clone()
+                if start_id is not None:
+                    filtered = filtered.filter(pl.col("start") == start_id)
+                if end_id is not None:
+                    filtered = filtered.filter(pl.col("end") == end_id)
+                result_dfs.append(filtered)
+        
+        if not result_dfs:
+            return pl.DataFrame({
+                "start": pl.Series([], dtype=pl.UInt64),
+                "end": pl.Series([], dtype=pl.UInt64)
+            })
+        
+        return pl.concat(result_dfs).unique()
+    
     def _execute_path_negated(
         self,
         path: PathNegatedPropertySet,
@@ -975,9 +1084,21 @@ class StorageExecutor:
         """
         union_results = []
         
+        def build_where_clause(alternative):
+            """Build a WhereClause from either list or dict alternative."""
+            if isinstance(alternative, dict):
+                return WhereClause(
+                    patterns=alternative.get('patterns', []),
+                    filters=alternative.get('filters', []),
+                    binds=alternative.get('binds', [])
+                )
+            else:
+                # Legacy format: just a list of patterns
+                return WhereClause(patterns=alternative)
+        
         for i, alternative in enumerate(union.alternatives):
             # Execute each alternative as a mini WHERE clause
-            alt_where = WhereClause(patterns=alternative)
+            alt_where = build_where_clause(alternative)
             alt_df = self._execute_where(alt_where, prefixes)
             
             if len(alt_df) > 0:
@@ -1022,9 +1143,21 @@ class StorageExecutor:
         """
         union_results = []
         
+        def build_where_clause(alternative):
+            """Build a WhereClause from either list or dict alternative."""
+            if isinstance(alternative, dict):
+                return WhereClause(
+                    patterns=alternative.get('patterns', []),
+                    filters=alternative.get('filters', []),
+                    binds=alternative.get('binds', [])
+                )
+            else:
+                # Legacy format: just a list of patterns
+                return WhereClause(patterns=alternative)
+        
         for i, alternative in enumerate(union.alternatives):
             # Execute each alternative as a mini WHERE clause
-            alt_where = WhereClause(patterns=alternative)
+            alt_where = build_where_clause(alternative)
             alt_df = self._execute_where(alt_where, prefixes)
             
             if len(alt_df) > 0:

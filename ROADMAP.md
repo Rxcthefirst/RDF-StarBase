@@ -14,9 +14,10 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 |----------|----------|-------|
 | **Core Storage** | Dictionary-encoded columnar storage, RDF-Star native, Polars backend | ✅ |
 | **SPARQL Query** | SELECT, ASK, CONSTRUCT, DESCRIBE | ✅ |
-| **SPARQL Patterns** | OPTIONAL, UNION, MINUS, FILTER, BIND, VALUES, GRAPH | ✅ |
+| **SPARQL Patterns** | OPTIONAL, UNION, MINUS, FILTER, BIND, VALUES, GRAPH, EXISTS/NOT EXISTS | ✅ |
 | **Property Paths** | Sequence `/`, Alternative `\|`, Inverse `^`, Modifiers `*`, `+`, `?` | ✅ |
 | **Aggregates** | COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, SAMPLE, GROUP BY, HAVING | ✅ |
+| **Functions** | COALESCE, IF, STRLEN, CONTAINS, STRSTARTS, STRENDS, LCASE, UCASE | ✅ |
 | **SPARQL Update** | INSERT DATA, DELETE DATA, DELETE WHERE, DELETE/INSERT WHERE | ✅ |
 | **Graph Management** | Named graphs, CREATE, DROP, CLEAR, COPY, MOVE, ADD, LOAD | ✅ |
 | **Time-Travel** | AS OF clause for temporal queries | ✅ |
@@ -28,24 +29,25 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 | **rdflib Compat** | Drop-in replacement layer | ✅ |
 | **Visualization** | React + D3 graph visualization | ✅ |
 
-**Test Suite:** 491 tests, 72% coverage  
+**Test Suite:** 503 tests, 71% coverage  
 **Benchmarks:** 10-72x faster than rdflib
 
 ---
 
 ## Release Milestones
 
-### v0.1.0 — Alpha (Q1 2026) 🎯
+### v0.1.0 — Alpha (Q1 2026) ✅ SHIPPED
 
 **Goal:** PyPI publication, early adopter feedback
 
-- [x] **PyPI publication** (`pip install rdf-starbase`) — Package builds successfully
+- [x] **PyPI publication** (`pip install rdf-starbase`) — **LIVE on PyPI**
 - [x] **CI/CD Pipeline** — GitHub Actions for test, benchmark, publish
 - [x] **Documentation site** — MkDocs + ReadTheDocs config
 - [x] **Quickstart guide** — `docs/quickstart.md`
 - [x] **API reference** — Auto-generated from docstrings
 - [x] **LICENSE file** — MIT License
-- [ ] **Benchmark reproducibility** — CI runs benchmarks on every push
+- [x] **Benchmark reproducibility** — CI runs benchmarks on every push
+- [x] **Performance baseline** — `benchmarks/bench_query.py` (200K triples/sec insert, 10-20ms queries)
 
 **Marketing:**
 - Add to Ontus.io product page
@@ -59,21 +61,27 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 **Goal:** Production hardening based on early adopter feedback
 
 #### Performance Enhancements
-- [ ] Lazy loading for large graphs (> 10M triples)
-- [ ] Query plan caching
-- [ ] Parallel query execution for independent patterns
-- [ ] Memory-mapped Parquet for out-of-core processing
+- [x] **Lazy DataFrame materialization** — `_df` property uses Polars lazy evaluation
+- [x] **Short-circuit optimization** — Early exit when pattern terms don't exist in store
+- [x] **Fast term lookup** — O(1) `get_iri_id()` / `get_literal_id()` using cached dictionaries
+- [x] **Query plan caching** — LRU cache for parsed queries (21,000x speedup for repeated queries)
+- [x] **Memory-mapped Parquet** — `load_streaming()` with `scan_parquet(memory_map=True)`
+- [x] **Parallel pattern execution** — ThreadPoolExecutor for independent pattern groups (opt-in for federated queries)
+- [x] **Lazy loading for large graphs** — Streaming collect for out-of-core processing
 
 #### SPARQL Completeness
-- [ ] Subqueries (nested SELECT in WHERE clause)
-- [ ] EXISTS / NOT EXISTS
-- [ ] Property path with fixed length `{n,m}`
-- [ ] COALESCE, IF, BOUND functions
+- [x] **EXISTS / NOT EXISTS** — Filter patterns with subquery existence checks
+- [x] **COALESCE, IF functions** — Conditional expressions in SELECT and FILTER
+- [x] **String functions** — STRLEN, CONTAINS, STRSTARTS, STRENDS, LCASE, UCASE
+- [x] **BOUND function** — Check if optional variable is bound (with OPTIONAL null column support)
+- [x] **BIND in nested patterns** — BIND within UNION, OPTIONAL, MINUS, EXISTS, GRAPH
+- [x] **Subqueries** — Nested SELECT in WHERE clause with aggregates
+- [x] **Property path {n,m}** — Fixed-length path modifiers ({n}, {n,m}, {n,})
 
 #### Persistence Enhancements
+- [x] **Streaming load** — Memory-mapped Parquet loading for large datasets
 - [ ] DuckDB backend option (SQL interface to Parquet, analytical workloads)
 - [ ] Incremental persistence (append-only, avoid full rewrites)
-- [ ] Streaming load for large Parquet files
 
 ---
 

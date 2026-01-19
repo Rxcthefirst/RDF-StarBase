@@ -15,7 +15,7 @@ import pytest
 from rdf_starbase.sparql.parser import SPARQLStarParser
 from rdf_starbase.sparql.ast import (
     TriplePattern, PathMod, PathSequence, PathAlternative,
-    PathInverse, PathNegatedPropertySet, PathIRI,
+    PathInverse, PathNegatedPropertySet, PathIRI, PathFixedLength,
     PropertyPathModifier, IRI
 )
 
@@ -99,6 +99,27 @@ class TestPropertyPathParsing:
         pred = self.get_first_predicate(parser, "SELECT * WHERE { ?s !(foaf:hates|foaf:dislikes) ?o }")
         assert isinstance(pred, PathNegatedPropertySet)
         assert len(pred.iris) == 2
+    
+    def test_fixed_length_exact(self, parser):
+        """Test fixed-length path: foaf:knows{2} (exactly 2 hops)."""
+        pred = self.get_first_predicate(parser, "SELECT * WHERE { ?s foaf:knows{2} ?o }")
+        assert isinstance(pred, PathFixedLength)
+        assert pred.min_length == 2
+        assert pred.max_length == 2
+    
+    def test_fixed_length_range(self, parser):
+        """Test fixed-length path: foaf:knows{2,4} (2 to 4 hops)."""
+        pred = self.get_first_predicate(parser, "SELECT * WHERE { ?s foaf:knows{2,4} ?o }")
+        assert isinstance(pred, PathFixedLength)
+        assert pred.min_length == 2
+        assert pred.max_length == 4
+    
+    def test_fixed_length_unbounded(self, parser):
+        """Test fixed-length path: foaf:knows{2,} (2 or more hops)."""
+        pred = self.get_first_predicate(parser, "SELECT * WHERE { ?s foaf:knows{2,} ?o }")
+        assert isinstance(pred, PathFixedLength)
+        assert pred.min_length == 2
+        assert pred.max_length is None  # Unbounded
     
     def test_multiple_paths_in_query(self, parser):
         """Test query with multiple path patterns."""

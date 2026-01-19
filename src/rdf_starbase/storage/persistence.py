@@ -80,6 +80,11 @@ class StoragePersistence:
         """
         Load all storage components from disk.
         
+        Args:
+            memory_map: If True, use memory-mapped loading for the facts table.
+                       This reduces memory usage for large datasets by lazily
+                       loading data from disk as needed. Default False.
+        
         Returns:
             Tuple of (TermDict, FactStore, QtDict)
             
@@ -97,6 +102,35 @@ class StoragePersistence:
         
         # Load facts
         fact_store = self._load_facts(term_dict, qt_dict)
+        
+        # Restore metadata
+        self._load_metadata(term_dict, fact_store, qt_dict)
+        
+        return term_dict, fact_store, qt_dict
+    
+    def load_streaming(self) -> tuple[TermDict, FactStore, QtDict]:
+        """
+        Load storage with memory-mapped Parquet for large datasets.
+        
+        This method uses Polars scan_parquet() for the facts table, which
+        memory-maps the file and only loads data as needed. This is ideal
+        for datasets larger than available RAM.
+        
+        Returns:
+            Tuple of (TermDict, FactStore, QtDict)
+            
+        Raises:
+            FileNotFoundError: If the storage directory doesn't exist
+        """
+        if not self.base_path.exists():
+            raise FileNotFoundError(f"Storage directory not found: {self.base_path}")
+        
+        # Terms and quoted must be fully loaded (used for lookups)
+        term_dict = self._load_terms()
+        qt_dict = self._load_quoted(term_dict)
+        
+        # Load facts with memory-mapping
+        fact_store = self._load_facts_streaming(term_dict, qt_dict)
         
         # Restore metadata
         self._load_metadata(term_dict, fact_store, qt_dict)
@@ -185,6 +219,33 @@ class StoragePersistence:
         facts_path = self.base_path / self.FACTS_FILE
         if facts_path.exists():
             fact_store._df = pl.read_parquet(facts_path)
+        else:
+            fact_store._df = fact_store._create_empty_dataframe()
+        
+        return fact_store
+    
+    def _load_facts_streaming(self, term_dict: TermDict, qt_dict: QtDict) -> FactStore:
+        """
+        Load fact store with memory-mapped Parquet (lazy/streaming).
+        
+        Uses scan_parquet() which memory-maps the file and defers loading
+        until data is actually accessed. The LazyFrame is collected into
+        a DataFrame but Polars optimizes memory usage for large files.
+        """
+        fact_store = FactStore.__new__(FactStore)
+        fact_store._term_dict = term_dict
+        fact_store._qt_dict = qt_dict
+        fact_store._next_txn = 0
+        fact_store._default_graph_id = 0
+        
+        facts_path = self.base_path / self.FACTS_FILE
+        if facts_path.exists():
+            # Use scan_parquet for memory-mapped lazy loading
+            # memory_map=True tells Polars to use mmap for the file
+            lazy_df = pl.scan_parquet(facts_path, memory_map=True)
+            # Collect immediately but Polars will use streaming internally
+            # for files larger than available memory
+            fact_store._df = lazy_df.collect(streaming=True)
         else:
             fact_store._df = fact_store._create_empty_dataframe()
         

@@ -155,6 +155,8 @@ class TripleStore:
         
         This is a computed property that builds a string-column DataFrame
         from the integer-based FactStore. Results are cached until invalidated.
+        
+        Uses optimized join-based approach with lazy evaluation.
         """
         if self._df_cache_valid and self._df_cache is not None:
             return self._df_cache
@@ -167,68 +169,84 @@ class TripleStore:
             self._df_cache_valid = True
             return self._df_cache
         
-        # Build term lookup DataFrame for fast Polars join
-        # Include datatype_id for typed value conversion
+        # Build term lookup DataFrame once for all joins
         term_rows = [
             {"term_id": tid, "lex": term.lex, "kind": int(term.kind), 
              "datatype_id": term.datatype_id if term.datatype_id else 0}
             for tid, term in self._term_dict._id_to_term.items()
         ]
         
-        if term_rows:
-            term_df = pl.DataFrame(term_rows).cast({
-                "term_id": pl.UInt64,
-                "lex": pl.Utf8,
-                "kind": pl.UInt8,
-                "datatype_id": pl.UInt64,
-            })
-        else:
-            term_df = pl.DataFrame({
-                "term_id": pl.Series([], dtype=pl.UInt64),
-                "lex": pl.Series([], dtype=pl.Utf8),
-                "kind": pl.Series([], dtype=pl.UInt8),
-                "datatype_id": pl.Series([], dtype=pl.UInt64),
-            })
+        if not term_rows:
+            self._df_cache = self._create_empty_dataframe()
+            self._df_cache_valid = True
+            return self._df_cache
         
-        # Rename fact columns to avoid conflicts during joins
-        result = fact_df.rename({
-            "source": "source_id",
-            "process": "process_id"
+        term_df = pl.DataFrame(term_rows).cast({
+            "term_id": pl.UInt64,
+            "lex": pl.Utf8,
+            "kind": pl.UInt8,
+            "datatype_id": pl.UInt64,
         })
         
-        # Subject - join drops right key automatically in Polars 1.x
-        result = result.join(
-            term_df.select([pl.col("term_id"), pl.col("lex").alias("subject")]),
-            left_on="s", right_on="term_id", how="left"
-        )
-        
-        # Predicate
-        result = result.join(
-            term_df.select([pl.col("term_id"), pl.col("lex").alias("predicate")]),
-            left_on="p", right_on="term_id", how="left"
-        )
-        
-        # Object + object type + typed object value
         # Get XSD numeric datatype IDs for typed value conversion
         xsd_integer_id = self._term_dict.xsd_integer_id
         xsd_decimal_id = self._term_dict.xsd_decimal_id
         xsd_double_id = self._term_dict.xsd_double_id
         xsd_boolean_id = self._term_dict.xsd_boolean_id
         
-        obj_df = term_df.select([
-            pl.col("term_id"),
-            pl.col("lex").alias("object"),
-            pl.col("datatype_id").alias("obj_datatype_id"),
-            pl.when(pl.col("kind") == int(TermKind.IRI)).then(pl.lit("uri"))
-              .when(pl.col("kind") == int(TermKind.BNODE)).then(pl.lit("bnode"))
-              .otherwise(pl.lit("literal"))
-              .alias("object_type")
-        ])
-        result = result.join(obj_df, left_on="o", right_on="term_id", how="left")
+        # Use lazy execution for join optimization
+        result = fact_df.lazy()
+        term_lazy = term_df.lazy()
         
-        # Create typed object_value column for numeric comparisons
-        # Cast lex to float for numeric datatypes, null otherwise
+        # Subject join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("subject")]),
+            left_on="s", right_on="term_id", how="left"
+        )
+        
+        # Predicate join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("predicate")]),
+            left_on="p", right_on="term_id", how="left"
+        )
+        
+        # Object join with kind and datatype
+        result = result.join(
+            term_lazy.select([
+                pl.col("term_id"),
+                pl.col("lex").alias("object"),
+                pl.col("kind").alias("obj_kind"),
+                pl.col("datatype_id").alias("obj_datatype_id"),
+            ]),
+            left_on="o", right_on="term_id", how="left"
+        )
+        
+        # Graph join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("graph")]),
+            left_on="g", right_on="term_id", how="left"
+        )
+        
+        # Source join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("source_str")]),
+            left_on="source", right_on="term_id", how="left"
+        )
+        
+        # Process join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("process_str")]),
+            left_on="process", right_on="term_id", how="left"
+        )
+        
+        # Add computed columns
         result = result.with_columns([
+            # Object type
+            pl.when(pl.col("obj_kind") == int(TermKind.IRI)).then(pl.lit("uri"))
+              .when(pl.col("obj_kind") == int(TermKind.BNODE)).then(pl.lit("bnode"))
+              .otherwise(pl.lit("literal"))
+              .alias("object_type"),
+            # Typed numeric value
             pl.when(
                 (pl.col("obj_datatype_id") == xsd_integer_id) |
                 (pl.col("obj_datatype_id") == xsd_decimal_id) |
@@ -242,55 +260,36 @@ class TripleStore:
                   .when(pl.col("object") == "false").then(pl.lit(0.0))
                   .otherwise(pl.lit(None))
             ).otherwise(pl.lit(None).cast(pl.Float64))
-            .alias("object_value")
+            .alias("object_value"),
+            # Deprecated flag
+            ((pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)) != 0).alias("deprecated"),
+            # Timestamp
+            (pl.col("t_added") * 1000).cast(pl.Datetime("ns", "UTC")).alias("timestamp"),
         ])
         
-        # Graph (handle 0 = default graph)
-        result = result.join(
-            term_df.select([pl.col("term_id"), pl.col("lex").alias("graph")]),
-            left_on="g", right_on="term_id", how="left"
-        )
+        # Collect and finalize
+        result = result.collect()
         
-        # Source
-        result = result.join(
-            term_df.select([pl.col("term_id"), pl.col("lex").alias("source")]),
-            left_on="source_id", right_on="term_id", how="left"
-        )
-        
-        # Process
-        result = result.join(
-            term_df.select([pl.col("term_id"), pl.col("lex").alias("process")]),
-            left_on="process_id", right_on="term_id", how="left"
-        )
-        
-        # Build final schema
+        # Build final schema with sequential assertion IDs
+        n = len(result)
         result = result.select([
-            pl.lit(None).cast(pl.Utf8).alias("assertion_id"),  # Deferred - generate on iteration
+            pl.arange(0, n, eager=True).cast(pl.Utf8).alias("assertion_id"),
             "subject",
             "predicate",
             "object",
             "object_type",
-            "object_value",  # Typed numeric value for FILTER comparisons
+            "object_value",
             "graph",
             pl.lit(None).cast(pl.Utf8).alias("quoted_triple_id"),
-            "source",
-            # Convert t_added microseconds to datetime
-            (pl.col("t_added") * 1000).cast(pl.Datetime("ns", "UTC")).alias("timestamp"),
+            pl.col("source_str").alias("source"),
+            "timestamp",
             "confidence",
-            "process",
+            pl.col("process_str").alias("process"),
             pl.lit(None).cast(pl.Utf8).alias("version"),
             pl.lit("{}").alias("metadata"),
             pl.lit(None).cast(pl.Utf8).alias("superseded_by"),
-            ((pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)) != 0).alias("deprecated"),
+            "deprecated",
         ])
-        
-        # Generate UUIDs using row_nr (fast)
-        n = len(result)
-        if n > 0:
-            # Use sequential IDs for now (much faster than UUID generation)
-            result = result.with_columns([
-                pl.arange(0, n, eager=True).cast(pl.Utf8).alias("assertion_id")
-            ])
         
         self._df_cache = result
         self._df_cache_valid = True
@@ -331,6 +330,73 @@ class TripleStore:
             "superseded_by": pl.Series([], dtype=pl.Utf8),
             "deprecated": pl.Series([], dtype=pl.Boolean),
         })
+    
+    def get_term_id(self, value: str, is_uri: bool = True) -> Optional[TermId]:
+        """
+        Look up a term ID without creating it.
+        
+        Used for query optimization - if term doesn't exist,
+        no rows can match that filter, so we can short-circuit.
+        
+        Args:
+            value: The term string value
+            is_uri: If True, treat as IRI; otherwise as literal
+            
+        Returns:
+            TermId if found, None if term doesn't exist in store
+        """
+        if is_uri:
+            return self._term_dict.get_iri_id(value)
+        else:
+            return self._term_dict.get_literal_id(value)
+    
+    def filter_facts_by_ids(
+        self,
+        s_id: Optional[TermId] = None,
+        p_id: Optional[TermId] = None,
+        o_id: Optional[TermId] = None,
+        g_id: Optional[TermId] = None,
+        include_deprecated: bool = False,
+    ) -> pl.LazyFrame:
+        """
+        Filter facts at the integer level before materialization.
+        
+        This enables filter pushdown to integer storage for better performance.
+        
+        Args:
+            s_id: Subject TermId filter (None = any)
+            p_id: Predicate TermId filter (None = any)
+            o_id: Object TermId filter (None = any)
+            g_id: Graph TermId filter (None = any)
+            include_deprecated: If True, include soft-deleted facts
+            
+        Returns:
+            LazyFrame with filtered facts (still integer-encoded)
+        """
+        lf = self._fact_store._df.lazy()
+        
+        # Apply filters
+        filters = []
+        
+        if not include_deprecated:
+            filters.append(~(pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED) != 0))
+        
+        if s_id is not None:
+            filters.append(pl.col("s") == s_id)
+        if p_id is not None:
+            filters.append(pl.col("p") == p_id)
+        if o_id is not None:
+            filters.append(pl.col("o") == o_id)
+        if g_id is not None:
+            filters.append(pl.col("g") == g_id)
+        
+        if filters:
+            combined = filters[0]
+            for f in filters[1:]:
+                combined = combined & f
+            lf = lf.filter(combined)
+        
+        return lf
     
     def add_triple(
         self,
@@ -663,6 +729,8 @@ class TripleStore:
         
         Saves all components: TermDict, QtDict, FactStore.
         """
+        from rdf_starbase.storage.persistence import StoragePersistence
+        
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -670,34 +738,42 @@ class TripleStore:
         store_dir = path.parent / (path.stem + "_unified")
         store_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save components
-        self._term_dict.save(store_dir / "terms")
-        self._qt_dict.save(store_dir / "quoted_triples")
-        self._fact_store.save(store_dir / "facts")
+        # Use StoragePersistence for consistent save/load
+        persistence = StoragePersistence(store_dir)
+        persistence.save(self._term_dict, self._fact_store, self._qt_dict)
         
         # Also save the legacy format for backward compatibility
         self._df.write_parquet(path)
     
     @classmethod
-    def load(cls, path: Path | str) -> "TripleStore":
+    def load(cls, path: Path | str, streaming: bool = False) -> "TripleStore":
         """
         Load a triple store from disk.
         
         Attempts to load unified format first, falls back to legacy.
+        
+        Args:
+            path: Path to the saved store (parquet file or directory)
+            streaming: If True, use memory-mapped loading for large datasets.
+                      This is recommended for datasets > 1M triples or when
+                      memory is constrained. Default False.
         """
         path = Path(path)
         store_dir = path.parent / (path.stem + "_unified")
         
         if store_dir.exists():
             # Load unified format
+            from rdf_starbase.storage.persistence import StoragePersistence
+            persistence = StoragePersistence(store_dir)
+            
             store = cls()
-            store._term_dict = TermDict.load(store_dir / "terms")
-            store._qt_dict = QtDict.load(store_dir / "quoted_triples", store._term_dict)
-            store._fact_store = FactStore.load(
-                store_dir / "facts", 
-                store._term_dict, 
-                store._qt_dict
-            )
+            if streaming:
+                store._term_dict, store._fact_store, store._qt_dict = persistence.load_streaming()
+            else:
+                store._term_dict, store._fact_store, store._qt_dict = persistence.load()
+            
+            # Re-initialize common terms after loading
+            store._init_common_terms()
             return store
         else:
             # Load legacy format and convert

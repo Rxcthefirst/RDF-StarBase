@@ -4,6 +4,7 @@ SPARQL-Star Parser using pyparsing.
 Implements parsing of SPARQL-Star queries following the W3C specification.
 """
 
+from functools import lru_cache
 from typing import Any, Optional
 import pyparsing as pp
 from pyparsing import (
@@ -26,9 +27,10 @@ from rdf_starbase.sparql.ast import (
     ComparisonOp, LogicalOp,
     WhereClause,
     Term,
+    ExistsExpression, SubSelect,
     # Property Path types
     PropertyPath, PathIRI, PathSequence, PathAlternative,
-    PathInverse, PathMod, PathNegatedPropertySet,
+    PathInverse, PathMod, PathFixedLength, PathNegatedPropertySet,
     PropertyPathModifier,
     # Graph management
     CreateGraphQuery, DropGraphQuery, ClearGraphQuery,
@@ -83,6 +85,25 @@ class SPARQLStarParser:
         STR = CaselessKeyword("STR")
         LANG = CaselessKeyword("LANG")
         DATATYPE = CaselessKeyword("DATATYPE")
+        
+        # Additional SPARQL functions
+        COALESCE = CaselessKeyword("COALESCE")
+        IF = CaselessKeyword("IF")
+        EXISTS = CaselessKeyword("EXISTS")
+        NOT_EXISTS = CaselessKeyword("NOT") + CaselessKeyword("EXISTS")
+        STRLEN = CaselessKeyword("STRLEN")
+        CONTAINS = CaselessKeyword("CONTAINS")
+        STRSTARTS = CaselessKeyword("STRSTARTS")
+        STRENDS = CaselessKeyword("STRENDS")
+        LCASE = CaselessKeyword("LCASE")
+        UCASE = CaselessKeyword("UCASE")
+        CONCAT = CaselessKeyword("CONCAT")
+        REPLACE = CaselessKeyword("REPLACE")
+        ABS = CaselessKeyword("ABS")
+        ROUND = CaselessKeyword("ROUND")
+        CEIL = CaselessKeyword("CEIL")
+        FLOOR = CaselessKeyword("FLOOR")
+        REGEX = CaselessKeyword("REGEX")
         
         # SPARQL Update keywords
         INSERT = CaselessKeyword("INSERT")
@@ -372,7 +393,7 @@ class SPARQLStarParser:
             )
         ).set_parse_action(make_path_negated)
         
-        # Modified IRI: iri+ or iri* or iri?
+        # Modified IRI: iri+ or iri* or iri? or iri{n,m}
         def make_path_mod(tokens):
             iri_val = tokens[0]
             mod_str = tokens[1]
@@ -385,12 +406,42 @@ class SPARQLStarParser:
                 return PathMod(path=path, modifier=PropertyPathModifier.ZERO_OR_ONE)
             return path
         
+        # Fixed length modifier: {n}, {n,m}, {n,}
+        def make_fixed_length(tokens):
+            iri_val = tokens[0]
+            min_len = int(tokens[1])
+            max_len = None
+            # Check if there's a comma and maybe a max value
+            if len(tokens) > 2:
+                if tokens[2] == ",":
+                    if len(tokens) > 3:
+                        max_len = int(tokens[3])
+                    # else max_len stays None (unbounded)
+                else:
+                    max_len = min_len  # {n} means exactly n
+            else:
+                max_len = min_len  # {n} means exactly n
+            path = make_path_iri(iri_val)
+            return PathFixedLength(path=path, min_length=min_len, max_length=max_len)
+        
+        # Fixed length path: iri{n} or iri{n,m} or iri{n,}
+        fixed_length_modifier = (
+            Suppress(Lit("{")) + 
+            Word(nums) + 
+            Opt(Lit(",") + Opt(Word(nums))) + 
+            Suppress(Lit("}"))
+        )
+        
+        path_iri_fixed = (
+            iri + fixed_length_modifier
+        ).set_parse_action(make_fixed_length)
+        
         path_iri_modified = (
             iri + (PATH_STAR | PATH_PLUS | PATH_QUESTION)
         ).set_parse_action(make_path_mod)
         
-        # A path element: inverse, negated, modified IRI, or grouped
-        path_element = path_inverse | path_negated | path_iri_modified | path_group
+        # A path element: inverse, negated, fixed-length, modified IRI, or grouped
+        path_element = path_inverse | path_negated | path_iri_fixed | path_iri_modified | path_group
         
         # A path step (for sequences): path element or plain IRI
         def wrap_path_step(tokens):
@@ -473,7 +524,7 @@ class SPARQLStarParser:
         def is_predicate_type(token):
             """Check if a token is a valid predicate type."""
             # Path expressions are always predicates
-            if isinstance(token, (PathIRI, PathSequence, PathAlternative, PathInverse, PathMod, PathNegatedPropertySet)):
+            if isinstance(token, (PathIRI, PathSequence, PathAlternative, PathInverse, PathMod, PathNegatedPropertySet, PathFixedLength)):
                 return True
             # Plain IRIs can be predicates
             if isinstance(token, IRI):
@@ -548,7 +599,7 @@ class SPARQLStarParser:
                         if i < len(tokens_list):
                             next_tok = tokens_list[i]
                             # If next is a path expression (not just IRI), it's a predicate
-                            if isinstance(next_tok, (PathIRI, PathSequence, PathAlternative, PathInverse, PathMod, PathNegatedPropertySet)):
+                            if isinstance(next_tok, (PathIRI, PathSequence, PathAlternative, PathInverse, PathMod, PathNegatedPropertySet, PathFixedLength)):
                                 break
                             # If next is IRI, need to peek further to determine if predicate or object
                             # Heuristic: if it's followed by something that could be an object, it's a predicate
@@ -583,6 +634,8 @@ class SPARQLStarParser:
         # Function call
         func_name = (
             BOUND | ISIRI | ISBLANK | ISLITERAL | STR | LANG | DATATYPE |
+            COALESCE | IF | STRLEN | CONTAINS | STRSTARTS | STRENDS |
+            LCASE | UCASE | CONCAT | REPLACE | ABS | ROUND | CEIL | FLOOR | REGEX |
             Word(alphas, alphanums + "_")
         )
         
@@ -666,10 +719,41 @@ class SPARQLStarParser:
         # Forward declaration for nested group patterns
         group_graph_pattern = Forward()
         
+        # Forward declaration for bind_clause (defined later, used in nested patterns)
+        bind_clause = Forward()
+        
+        # Forward declaration for subselect_pattern (nested SELECT)
+        subselect_pattern = Forward()
+        
+        # EXISTS and NOT EXISTS (defined after group_graph_pattern)
+        def make_exists_filter(tokens):
+            """Create an ExistsExpression filter."""
+            negated = str(tokens[0]).upper() == "NOT"
+            # Find the WhereClause in the tokens
+            patterns_start = 1 if negated else 0
+            # The group_graph_pattern returns a list of patterns
+            inner_patterns = []
+            inner_filters = []
+            for t in tokens[patterns_start + 1:]:  # Skip EXISTS keyword
+                if isinstance(t, (TriplePattern, QuotedTriplePattern)):
+                    inner_patterns.append(t)
+                elif isinstance(t, list):
+                    for item in t:
+                        if isinstance(item, (TriplePattern, QuotedTriplePattern)):
+                            inner_patterns.append(item)
+                        elif isinstance(item, Filter):
+                            inner_filters.append(item)
+                elif isinstance(t, Filter):
+                    inner_filters.append(t)
+            
+            inner_where = WhereClause(patterns=inner_patterns, filters=inner_filters)
+            return Filter(expression=ExistsExpression(pattern=inner_where, negated=negated))
+        
         # OPTIONAL { ... }
         def make_optional(tokens):
             patterns = []
             filters = []
+            binds = []
             for token in tokens:
                 if isinstance(token, (TriplePattern, QuotedTriplePattern)):
                     patterns.append(token)
@@ -681,18 +765,21 @@ class SPARQLStarParser:
                     filters.append(token)
                 elif isinstance(token, OptionalPattern):
                     patterns.append(token)
-            return OptionalPattern(patterns=patterns, filters=filters)
+                elif isinstance(token, Bind):
+                    binds.append(token)
+            return OptionalPattern(patterns=patterns, filters=filters, binds=binds)
         
         optional_pattern = (
-            Suppress(OPTIONAL) + LBRACE + ZeroOrMore(triple_pattern | filter_clause) + RBRACE
+            Suppress(OPTIONAL) + LBRACE + ZeroOrMore(triple_pattern | filter_clause | bind_clause) + RBRACE
         ).set_parse_action(make_optional)
         
         # UNION { ... } UNION { ... }
         # A group graph pattern that can participate in UNION
         def make_group_pattern(tokens):
-            """Convert a list of patterns/filters into a tuple for UNION alternatives."""
+            """Convert a list of patterns/filters/binds into a tuple for UNION alternatives."""
             patterns = []
             filters = []
+            binds = []
             for token in tokens:
                 if isinstance(token, (TriplePattern, QuotedTriplePattern)):
                     patterns.append(token)
@@ -704,19 +791,26 @@ class SPARQLStarParser:
                     filters.append(token)
                 elif isinstance(token, OptionalPattern):
                     patterns.append(token)
-            return (patterns, filters)
+                elif isinstance(token, Bind):
+                    binds.append(token)
+            return (patterns, filters, binds)
         
         union_alternative = (
-            LBRACE + ZeroOrMore(triple_pattern | filter_clause | optional_pattern) + RBRACE
+            LBRACE + ZeroOrMore(triple_pattern | filter_clause | optional_pattern | bind_clause) + RBRACE
         ).set_parse_action(make_group_pattern)
         
         def make_union(tokens):
             """Combine UNION alternatives into UnionPattern."""
             alternatives = []
             for token in tokens:
-                if isinstance(token, tuple) and len(token) == 2:
-                    patterns, filters = token
-                    alternatives.append(patterns)
+                if isinstance(token, tuple) and len(token) == 3:
+                    patterns, filters, binds = token
+                    # Store as WhereClause-like structure for full support
+                    alternatives.append({
+                        'patterns': patterns,
+                        'filters': filters,
+                        'binds': binds
+                    })
             return UnionPattern(alternatives=alternatives)
         
         union_pattern = (
@@ -745,8 +839,49 @@ class SPARQLStarParser:
             return MinusPattern(patterns=patterns, filters=filters)
         
         minus_pattern = (
-            Suppress(MINUS) + LBRACE + ZeroOrMore(triple_pattern | filter_clause) + RBRACE
+            Suppress(MINUS) + LBRACE + ZeroOrMore(triple_pattern | filter_clause | bind_clause) + RBRACE
         ).set_parse_action(make_minus)
+        
+        # =================================================================
+        # EXISTS / NOT EXISTS Filter
+        # =================================================================
+        
+        # EXISTS { patterns } or NOT EXISTS { patterns }
+        exists_filter_clause = (
+            Suppress(FILTER) + (
+                (Suppress(NOT) + Suppress(EXISTS) + LBRACE + ZeroOrMore(triple_pattern | filter_clause | bind_clause) + RBRACE) |
+                (Suppress(EXISTS) + LBRACE + ZeroOrMore(triple_pattern | filter_clause | bind_clause) + RBRACE)
+            )
+        ).set_parse_action(lambda t: make_exists_filter(["NOT"] + list(t) if len(list(t)) > 0 and str(t[0]).upper() == "NOT" else list(t)))
+        
+        def make_exists_filter_inner(tokens, negated=False):
+            """Create an ExistsExpression filter from parsed tokens."""
+            inner_patterns = []
+            inner_filters = []
+            for t in tokens:
+                if isinstance(t, (TriplePattern, QuotedTriplePattern)):
+                    inner_patterns.append(t)
+                elif isinstance(t, list):
+                    for item in t:
+                        if isinstance(item, (TriplePattern, QuotedTriplePattern)):
+                            inner_patterns.append(item)
+                        elif isinstance(item, Filter):
+                            inner_filters.append(item)
+                elif isinstance(t, Filter):
+                    inner_filters.append(t)
+            
+            inner_where = WhereClause(patterns=inner_patterns, filters=inner_filters)
+            return Filter(expression=ExistsExpression(pattern=inner_where, negated=negated))
+        
+        not_exists_filter = (
+            Suppress(FILTER) + Suppress(NOT) + Suppress(EXISTS) + 
+            LBRACE + ZeroOrMore(triple_pattern | filter_clause) + RBRACE
+        ).set_parse_action(lambda t: make_exists_filter_inner(t, negated=True))
+        
+        exists_filter = (
+            Suppress(FILTER) + Suppress(EXISTS) + 
+            LBRACE + ZeroOrMore(triple_pattern | filter_clause) + RBRACE
+        ).set_parse_action(lambda t: make_exists_filter_inner(t, negated=False))
         
         # =================================================================
         # BIND Clause
@@ -762,7 +897,7 @@ class SPARQLStarParser:
             var = tokens[1]
             return Bind(expression=expr, variable=var)
         
-        bind_clause = (
+        bind_clause <<= (
             Suppress(BIND) + LPAREN + 
             (expression | literal | float_literal | integer_literal | variable | iri) + 
             Suppress(AS) + bind_variable + 
@@ -830,6 +965,8 @@ class SPARQLStarParser:
         def make_graph_pattern(tokens):
             graph_ref = tokens[0]
             patterns = []
+            binds = []
+            filters = []
             for token in tokens[1:]:
                 if isinstance(token, (TriplePattern, QuotedTriplePattern)):
                     patterns.append(token)
@@ -837,17 +974,21 @@ class SPARQLStarParser:
                     for item in token:
                         if isinstance(item, (TriplePattern, QuotedTriplePattern)):
                             patterns.append(item)
-            return GraphPattern(graph=graph_ref, patterns=patterns)
+                elif isinstance(token, Bind):
+                    binds.append(token)
+                elif isinstance(token, Filter):
+                    filters.append(token)
+            return GraphPattern(graph=graph_ref, patterns=patterns, binds=binds, filters=filters)
         
         graph_pattern <<= (
-            Suppress(GRAPH) + (variable | iri) + LBRACE + ZeroOrMore(triple_pattern) + RBRACE
+            Suppress(GRAPH) + (variable | iri) + LBRACE + ZeroOrMore(triple_pattern | filter_clause | bind_clause) + RBRACE
         ).set_parse_action(make_graph_pattern)
         
         # =================================================================
         # WHERE Clause
         # =================================================================
         
-        where_pattern = triple_pattern | filter_clause | optional_pattern | union_pattern | minus_pattern | bind_clause | values_clause | graph_pattern
+        where_pattern = triple_pattern | not_exists_filter | exists_filter | filter_clause | optional_pattern | union_pattern | minus_pattern | bind_clause | values_clause | graph_pattern | subselect_pattern
         
         def make_where_clause(tokens):
             patterns = []
@@ -858,6 +999,7 @@ class SPARQLStarParser:
             binds = []
             values = None
             graph_patterns = []
+            subselects = []
             for token in tokens:
                 if isinstance(token, (TriplePattern, QuotedTriplePattern)):
                     patterns.append(token)
@@ -880,6 +1022,8 @@ class SPARQLStarParser:
                     values = token
                 elif isinstance(token, GraphPattern):
                     graph_patterns.append(token)
+                elif isinstance(token, SubSelect):
+                    subselects.append(token)
             return WhereClause(
                 patterns=patterns, 
                 filters=filters, 
@@ -888,7 +1032,8 @@ class SPARQLStarParser:
                 minus_patterns=minus_patterns,
                 binds=binds,
                 values=values,
-                graph_patterns=graph_patterns
+                graph_patterns=graph_patterns,
+                subselects=subselects
             )
         
         # WHERE clause with optional WHERE keyword (for ASK queries)
@@ -1120,6 +1265,81 @@ class SPARQLStarParser:
         
         def make_from_named_clause(tokens):
             return ("FROM_NAMED", tokens[0])
+        
+        # =================================================================
+        # SubSelect (nested SELECT in WHERE clause)
+        # =================================================================
+        
+        def make_subselect(tokens):
+            """Build a SubSelect AST node from parsed tokens."""
+            variables = []
+            where = WhereClause()
+            distinct = False
+            limit = None
+            offset = None
+            group_by = []
+            having = None
+            order_by = []
+            
+            for token in tokens:
+                if isinstance(token, tuple) and len(token) == 2:
+                    if token[0] == "GROUP_BY":
+                        group_by = token[1]
+                    elif isinstance(token[0], Variable):
+                        # This is an order by condition
+                        order_by.append(token)
+                elif token == "DISTINCT":
+                    distinct = True
+                elif isinstance(token, AggregateExpression):
+                    variables.append(token)
+                elif isinstance(token, Variable):
+                    variables.append(token)
+                elif isinstance(token, (Comparison, LogicalExpression, FunctionCall)):
+                    # HAVING expression
+                    having = Filter(expression=token)
+                elif isinstance(token, pp.ParseResults) or isinstance(token, list):
+                    token_list = list(token)
+                    if token_list and isinstance(token_list[0], (Variable, AggregateExpression)):
+                        variables = token_list
+                    elif token_list and isinstance(token_list[0], tuple):
+                        if token_list[0][0] == "GROUP_BY":
+                            group_by = token_list[0][1]
+                        else:
+                            order_by = token_list
+                    elif token_list == []:
+                        pass  # SELECT *
+                elif isinstance(token, WhereClause):
+                    where = token
+                elif isinstance(token, int):
+                    if limit is None:
+                        limit = token
+                    else:
+                        offset = token
+            
+            return SubSelect(
+                variables=variables,
+                where=where,
+                distinct=distinct,
+                group_by=group_by,
+                having=having,
+                order_by=[],  # Order by in subselect is complex, skip for now
+                limit=limit,
+                offset=offset
+            )
+        
+        # SubSelect grammar - enclosed in braces within WHERE clause
+        subselect_pattern <<= (
+            LBRACE +
+            Suppress(SELECT) +
+            Opt(DISTINCT.set_parse_action(make_distinct)) +
+            Group(select_vars) +
+            where_clause +
+            Opt(Group(group_by_clause)) +
+            Opt(having_clause) +
+            Opt(limit_clause) +
+            Opt(offset_clause) +
+            RBRACE
+        ).set_parse_action(make_subselect)
         
         select_query = (
             ZeroOrMore(prefix_decl) +
@@ -1698,11 +1918,27 @@ class SPARQLStarParser:
 _parser: Optional[SPARQLStarParser] = None
 
 
+@lru_cache(maxsize=256)
+def _cached_parse(query_string: str) -> Query:
+    """
+    Internal cached parse function.
+    
+    Uses LRU cache to avoid re-parsing identical query strings.
+    Cache size of 256 balances memory usage with hit rate for typical workloads.
+    """
+    global _parser
+    if _parser is None:
+        _parser = SPARQLStarParser()
+    return _parser.parse(query_string)
+
+
 def parse_query(query_string: str) -> Query:
     """
     Parse a SPARQL-Star query string.
     
-    This is a convenience function that uses a cached parser instance.
+    This function uses LRU caching to avoid re-parsing identical queries.
+    For repeated execution of the same query (common in benchmarks and
+    production workloads), this provides significant speedup.
     
     Args:
         query_string: The SPARQL-Star query to parse
@@ -1710,7 +1946,14 @@ def parse_query(query_string: str) -> Query:
     Returns:
         Parsed Query AST
     """
-    global _parser
-    if _parser is None:
-        _parser = SPARQLStarParser()
-    return _parser.parse(query_string)
+    return _cached_parse(query_string)
+
+
+def clear_query_cache():
+    """Clear the query parsing cache."""
+    _cached_parse.cache_clear()
+
+
+def get_query_cache_info():
+    """Get cache statistics (hits, misses, size, maxsize)."""
+    return _cached_parse.cache_info()

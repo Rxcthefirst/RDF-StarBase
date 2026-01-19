@@ -24,6 +24,7 @@ metadata (source, confidence) rather than creating separate triples.
 
 from typing import Any, Optional, Union, TYPE_CHECKING
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import polars as pl
 
@@ -41,6 +42,7 @@ from rdf_starbase.sparql.ast import (
     ComparisonOp, LogicalOp,
     WhereClause,
     Term,
+    ExistsExpression, SubSelect,
 )
 from rdf_starbase.models import ProvenanceContext
 
@@ -121,6 +123,14 @@ PROV_PREDICATE_MAP = {
 }
 
 
+# Configuration for parallel execution
+# Note: Parallel execution is primarily beneficial for I/O-bound operations
+# (e.g., federated SERVICE queries). For local CPU-bound Polars operations,
+# Python's GIL limits benefits and Polars already parallelizes internally.
+_PARALLEL_THRESHOLD = 3  # Minimum patterns to trigger parallel execution
+_MAX_WORKERS = 4  # Maximum parallel workers
+
+
 class SPARQLExecutor:
     """
     Executes SPARQL-Star queries against a TripleStore.
@@ -131,17 +141,133 @@ class SPARQLExecutor:
     - Joins are performed for patterns sharing variables
     - Filters become Polars filter expressions
     - Uses lazy evaluation for query optimization
+    
+    Performance features:
+    - Query plan caching (via parser)
+    - Short-circuit on non-existent terms
+    - Parallel execution for independent patterns (opt-in, useful for federated queries)
     """
     
-    def __init__(self, store: "TripleStore"):
+    def __init__(self, store: "TripleStore", parallel: bool = False):
         """
         Initialize executor with a triple store.
         
         Args:
             store: The TripleStore to query
+            parallel: If True, execute independent patterns in parallel.
+                     Default False (Polars already parallelizes internally).
+                     Set True for federated/SERVICE queries.
         """
         self.store = store
         self._var_counter = 0
+        self._parallel = parallel
+    
+    def _get_pattern_variables(self, pattern: TriplePattern) -> set[str]:
+        """Extract variable names from a triple pattern."""
+        vars_set = set()
+        if isinstance(pattern.subject, Variable):
+            vars_set.add(pattern.subject.name)
+        if isinstance(pattern.predicate, Variable):
+            vars_set.add(pattern.predicate.name)
+        if isinstance(pattern.object, Variable):
+            vars_set.add(pattern.object.name)
+        elif isinstance(pattern.object, QuotedTriplePattern):
+            # Handle quoted triple variables
+            qt = pattern.object
+            if isinstance(qt.subject, Variable):
+                vars_set.add(qt.subject.name)
+            if isinstance(qt.predicate, Variable):
+                vars_set.add(qt.predicate.name)
+            if isinstance(qt.object, Variable):
+                vars_set.add(qt.object.name)
+        return vars_set
+    
+    def _find_independent_groups(
+        self, patterns: list[tuple[int, TriplePattern, Any]]
+    ) -> list[list[tuple[int, TriplePattern, Any]]]:
+        """
+        Group patterns into independent sets that can be executed in parallel.
+        
+        Two patterns are independent if they share no variables.
+        Returns a list of groups where patterns within each group share variables.
+        """
+        if not patterns:
+            return []
+        
+        # Build adjacency based on shared variables
+        n = len(patterns)
+        groups = []
+        visited = [False] * n
+        
+        for i in range(n):
+            if visited[i]:
+                continue
+            
+            # Start a new group with this pattern
+            group = [patterns[i]]
+            visited[i] = True
+            group_vars = self._get_pattern_variables(patterns[i][1])
+            
+            # Find all patterns that share variables with this group
+            changed = True
+            while changed:
+                changed = False
+                for j in range(n):
+                    if visited[j]:
+                        continue
+                    pattern_vars = self._get_pattern_variables(patterns[j][1])
+                    if group_vars & pattern_vars:  # Shared variables
+                        group.append(patterns[j])
+                        group_vars |= pattern_vars
+                        visited[j] = True
+                        changed = True
+            
+            groups.append(group)
+        
+        return groups
+    
+    def _execute_pattern_group(
+        self,
+        group: list[tuple[int, TriplePattern, Any]],
+        prefixes: dict[str, str],
+        as_of: Optional[datetime],
+        from_graphs: Optional[list[str]],
+    ) -> pl.DataFrame:
+        """
+        Execute a group of related patterns (patterns sharing variables).
+        
+        This is used by parallel execution to process independent pattern groups
+        in separate threads.
+        """
+        result_df: Optional[pl.DataFrame] = None
+        
+        for i, pattern, prov_binding in group:
+            pattern_df = self._execute_pattern(pattern, prefixes, i, as_of=as_of, from_graphs=from_graphs)
+            
+            # Apply provenance binding if present
+            if prov_binding:
+                obj_var_name, col_name, pred_var_name = prov_binding
+                if col_name != "*":
+                    prov_col = f"_prov_{i}_{col_name}"
+                    if prov_col in pattern_df.columns:
+                        pattern_df = pattern_df.with_columns(
+                            pl.col(prov_col).alias(obj_var_name)
+                        )
+            
+            if result_df is None:
+                result_df = pattern_df
+            else:
+                # Join patterns that share variables
+                shared_cols = set(result_df.columns) & set(pattern_df.columns)
+                shared_cols -= {"_pattern_idx"}
+                shared_cols = {c for c in shared_cols if not c.startswith("_prov_")}
+                
+                if shared_cols:
+                    result_df = result_df.join(pattern_df, on=list(shared_cols), how="inner")
+                else:
+                    result_df = result_df.join(pattern_df, how="cross")
+        
+        return result_df if result_df is not None else pl.DataFrame()
     
     def execute(
         self, 
@@ -572,7 +698,40 @@ class SPARQLExecutor:
                 patterns_to_execute.append((i, pattern, None))
         
         # Execute patterns and join results
+        # Check if we can parallelize independent pattern groups
         result_df: Optional[pl.DataFrame] = None
+        
+        if self._parallel and len(patterns_to_execute) >= _PARALLEL_THRESHOLD:
+            # Group patterns by shared variables for parallel execution
+            groups = self._find_independent_groups(patterns_to_execute)
+            
+            if len(groups) > 1:
+                # Execute independent groups in parallel
+                with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(groups))) as executor:
+                    futures = {}
+                    for group in groups:
+                        future = executor.submit(
+                            self._execute_pattern_group,
+                            group, prefixes, as_of, from_graphs
+                        )
+                        futures[future] = group
+                    
+                    # Collect results and cross-join independent groups
+                    group_results = []
+                    for future in as_completed(futures):
+                        group_df = future.result()
+                        if len(group_df) > 0:
+                            group_results.append(group_df)
+                    
+                    # Cross-join the independent groups
+                    for group_df in group_results:
+                        if result_df is None:
+                            result_df = group_df
+                        else:
+                            result_df = result_df.join(group_df, how="cross")
+                
+                # Skip the sequential loop since we processed everything
+                patterns_to_execute = []
         
         for i, pattern, prov_binding in patterns_to_execute:
             pattern_df = self._execute_pattern(pattern, prefixes, i, as_of=as_of, from_graphs=from_graphs)
@@ -683,17 +842,22 @@ class SPARQLExecutor:
         if result_df is None:
             return pl.DataFrame()
         
-        # Apply standard FILTER clauses
-        for filter_clause in where.filters:
-            result_df = self._apply_filter(result_df, filter_clause)
-        
         # Apply OPTIONAL patterns with left outer joins
+        # (MUST come before FILTER since FILTER may reference optional variables)
         for optional in where.optional_patterns:
             result_df = self._apply_optional(result_df, optional, prefixes)
+        
+        # Apply standard FILTER clauses (after OPTIONAL so variables are available)
+        for filter_clause in where.filters:
+            result_df = self._apply_filter(result_df, filter_clause, prefixes)
         
         # Apply BIND clauses - add new columns with computed values
         for bind in where.binds:
             result_df = self._apply_bind(result_df, bind, prefixes)
+        
+        # Apply SubSelect (nested SELECT) clauses
+        for subselect in where.subselects:
+            result_df = self._apply_subselect(result_df, subselect, prefixes)
         
         # Apply VALUES clause - filter/join with inline data
         if where.values:
@@ -727,6 +891,9 @@ class SPARQLExecutor:
         """
         Execute a single triple pattern against the store.
         
+        Uses integer-level filter pushdown for performance when possible.
+        Falls back to string-level filtering for complex patterns.
+        
         Args:
             pattern: The triple pattern to match
             prefixes: Prefix mappings
@@ -736,12 +903,82 @@ class SPARQLExecutor:
         
         Returns a DataFrame with columns for each variable in the pattern.
         """
-        # Start with all assertions
+        # Try integer-level pushdown for concrete terms
+        # This avoids materializing the full DataFrame when we can filter at int level
+        s_id = None
+        p_id = None
+        o_id = None
+        
+        term_dict = self.store._term_dict
+        
+        # Look up term IDs for concrete pattern elements
+        # This is primarily for short-circuit optimization - if a term doesn't
+        # exist in the store, we can return empty immediately without scanning
+        if not isinstance(pattern.subject, Variable):
+            s_value = self._resolve_term(pattern.subject, prefixes)
+            s_id = term_dict.get_iri_id(s_value)
+            if s_id is None:
+                # Subject term not in store - no matches possible
+                return self._empty_pattern_result(pattern)
+        
+        if not isinstance(pattern.predicate, Variable):
+            p_value = self._resolve_term(pattern.predicate, prefixes)
+            p_id = term_dict.get_iri_id(p_value)
+            if p_id is None:
+                # Predicate term not in store - no matches possible
+                return self._empty_pattern_result(pattern)
+        
+        if not isinstance(pattern.object, (Variable, QuotedTriplePattern)):
+            o_value = str(self._resolve_term(pattern.object, prefixes))
+            # Object could be IRI or literal - check both caches
+            o_id = term_dict.get_iri_id(o_value)
+            if o_id is None:
+                o_id = term_dict.get_literal_id(o_value)
+            if o_id is None:
+                # Object term not in store - no matches possible
+                return self._empty_pattern_result(pattern)
+        
+        # Use the full scan path - the cached _df plus Polars lazy filter
+        # is very fast, and avoids the overhead of rebuilding term lookups
+        return self._execute_pattern_full_scan(
+            pattern, prefixes, pattern_idx, as_of, from_graphs
+        )
+    
+    def _empty_pattern_result(self, pattern: TriplePattern) -> pl.DataFrame:
+        """Create an empty DataFrame with the correct columns for a pattern."""
+        cols = {}
+        if isinstance(pattern.subject, Variable):
+            cols[pattern.subject.name] = pl.Series([], dtype=pl.Utf8)
+        if isinstance(pattern.predicate, Variable):
+            cols[pattern.predicate.name] = pl.Series([], dtype=pl.Utf8)
+        if isinstance(pattern.object, Variable):
+            cols[pattern.object.name] = pl.Series([], dtype=pl.Utf8)
+            cols[f"{pattern.object.name}_value"] = pl.Series([], dtype=pl.Float64)
+        return pl.DataFrame(cols) if cols else pl.DataFrame({"_match": []})
+    
+    def _execute_pattern_full_scan(
+        self,
+        pattern: TriplePattern,
+        prefixes: dict[str, str],
+        pattern_idx: int,
+        as_of: Optional[datetime],
+        from_graphs: Optional[list[str]],
+    ) -> pl.DataFrame:
+        """
+        Execute pattern with full DataFrame scan (fallback for all-variable patterns).
+        """
+        # Start with all assertions - use lazy for predicate pushdown
         df = self.store._df.lazy()
+        
+        # Collect all filter conditions for pushdown
+        filters = []
+        
+        # Exclude deprecated by default (pushdown)
+        filters.append(~pl.col("deprecated"))
         
         # Apply time-travel filter if specified
         if as_of is not None:
-            df = df.filter(pl.col("timestamp") <= as_of)
+            filters.append(pl.col("timestamp") <= as_of)
         
         # Apply FROM graph restriction
         if from_graphs is not None:
@@ -756,49 +993,28 @@ class SPARQLExecutor:
                 combined = graph_conditions[0]
                 for cond in graph_conditions[1:]:
                     combined = combined | cond
-                df = df.filter(combined)
+                filters.append(combined)
         
-        # Apply time-travel filter if specified
-        if as_of is not None:
-            df = df.filter(pl.col("timestamp") <= as_of)
-        
-        # Apply filters for concrete terms
+        # Apply filters for concrete terms - pushdown to lazy evaluation
         if not isinstance(pattern.subject, Variable):
             value = self._resolve_term(pattern.subject, prefixes)
-            # Match both with and without angle brackets for URIs
-            if value.startswith("http"):
-                df = df.filter(
-                    (pl.col("subject") == value) | 
-                    (pl.col("subject") == f"<{value}>")
-                )
-            else:
-                df = df.filter(pl.col("subject") == value)
+            filters.append(pl.col("subject") == value)
         
         if not isinstance(pattern.predicate, Variable):
             value = self._resolve_term(pattern.predicate, prefixes)
-            # Match both with and without angle brackets for URIs
-            if value.startswith("http"):
-                df = df.filter(
-                    (pl.col("predicate") == value) | 
-                    (pl.col("predicate") == f"<{value}>")
-                )
-            else:
-                df = df.filter(pl.col("predicate") == value)
+            filters.append(pl.col("predicate") == value)
         
         if not isinstance(pattern.object, (Variable, QuotedTriplePattern)):
             value = self._resolve_term(pattern.object, prefixes)
             str_value = str(value)
-            # Match both with and without angle brackets for URIs
-            if str_value.startswith("http"):
-                df = df.filter(
-                    (pl.col("object") == str_value) | 
-                    (pl.col("object") == f"<{str_value}>")
-                )
-            else:
-                df = df.filter(pl.col("object") == str_value)
+            filters.append(pl.col("object") == str_value)
         
-        # Exclude deprecated by default
-        df = df.filter(~pl.col("deprecated"))
+        # Apply all filters at once for optimal pushdown
+        if filters:
+            combined_filter = filters[0]
+            for f in filters[1:]:
+                combined_filter = combined_filter & f
+            df = df.filter(combined_filter)
         
         # Collect results
         result = df.collect()
@@ -827,8 +1043,9 @@ class SPARQLExecutor:
         # Always include provenance columns for provenance filters
         provenance_cols = ["source", "confidence", "timestamp", "process"]
         for col in provenance_cols:
-            renames[col] = f"_prov_{pattern_idx}_{col}"
-            select_cols.append(col)
+            if col in result.columns:
+                renames[col] = f"_prov_{pattern_idx}_{col}"
+                select_cols.append(col)
         
         # Select and rename
         if select_cols:
@@ -1003,12 +1220,66 @@ class SPARQLExecutor:
         else:
             return str(term)
     
-    def _apply_filter(self, df: pl.DataFrame, filter_clause: Filter) -> pl.DataFrame:
+    def _apply_filter(self, df: pl.DataFrame, filter_clause: Filter, prefixes: dict[str, str] = None) -> pl.DataFrame:
         """Apply a standard FILTER to the DataFrame."""
-        expr = self._build_filter_expression(filter_clause.expression)
+        if prefixes is None:
+            prefixes = {}
+        # Handle EXISTS/NOT EXISTS specially
+        if isinstance(filter_clause.expression, ExistsExpression):
+            return self._apply_exists_filter(df, filter_clause.expression, prefixes)
+        
+        expr = self._build_filter_expression(filter_clause.expression, df)
         if expr is not None:
             return df.filter(expr)
         return df
+    
+    def _apply_exists_filter(
+        self,
+        df: pl.DataFrame,
+        exists_expr: ExistsExpression,
+        prefixes: dict[str, str]
+    ) -> pl.DataFrame:
+        """
+        Apply EXISTS or NOT EXISTS filter.
+        
+        EXISTS { pattern } keeps rows where pattern matches.
+        NOT EXISTS { pattern } keeps rows where pattern does NOT match.
+        """
+        # Execute the inner pattern with the same prefixes
+        pattern_df = self._execute_where(exists_expr.pattern, prefixes)
+        
+        if pattern_df is None or len(pattern_df) == 0:
+            # No matches in pattern
+            if exists_expr.negated:
+                # NOT EXISTS with no matches -> keep all rows
+                return df
+            else:
+                # EXISTS with no matches -> keep no rows
+                return df.head(0)
+        
+        # Find shared variables between outer query and EXISTS pattern
+        shared_cols = set(df.columns) & set(pattern_df.columns)
+        # Remove internal columns
+        shared_cols = {c for c in shared_cols if not c.startswith("_")}
+        
+        if not shared_cols:
+            # No shared variables - EXISTS is either true or false for all rows
+            if exists_expr.negated:
+                # NOT EXISTS with matches but no join -> keep no rows
+                return df.head(0)
+            else:
+                # EXISTS with matches but no join -> keep all rows
+                return df
+        
+        # Use anti-join for NOT EXISTS, semi-join for EXISTS
+        if exists_expr.negated:
+            # NOT EXISTS: keep rows that DON'T have a match
+            return df.join(pattern_df.select(list(shared_cols)).unique(), 
+                          on=list(shared_cols), how="anti")
+        else:
+            # EXISTS: keep rows that DO have a match
+            return df.join(pattern_df.select(list(shared_cols)).unique(), 
+                          on=list(shared_cols), how="semi")
     
     def _apply_optional(
         self,
@@ -1022,6 +1293,15 @@ class SPARQLExecutor:
         OPTIONAL { ... } patterns add bindings when matched but keep
         rows even when no match exists (with NULL for optional columns).
         """
+        # Collect all variables that will be bound by the optional pattern
+        optional_variables = set()
+        for pattern in optional.patterns:
+            if hasattr(pattern, 'get_variables'):
+                for var in pattern.get_variables():
+                    optional_variables.add(var.name)
+        for bind in optional.binds:
+            optional_variables.add(bind.variable.name)
+        
         # Execute the optional patterns
         optional_df: Optional[pl.DataFrame] = None
         
@@ -1040,12 +1320,21 @@ class SPARQLExecutor:
                     else:
                         optional_df = optional_df.join(pattern_df, how="cross")
         
+        # Handle case where optional pattern has no matches
         if optional_df is None or len(optional_df) == 0:
+            # Add null columns for all optional variables that aren't already in df
+            for var_name in optional_variables:
+                if var_name not in df.columns:
+                    df = df.with_columns(pl.lit(None).alias(var_name))
             return df
         
         # Apply filters within the optional block
         for filter_clause in optional.filters:
-            optional_df = self._apply_filter(optional_df, filter_clause)
+            optional_df = self._apply_filter(optional_df, filter_clause, prefixes)
+        
+        # Apply binds within the optional block
+        for bind in optional.binds:
+            optional_df = self._apply_bind(optional_df, bind, prefixes)
         
         # Remove internal columns from optional_df
         internal_cols = [c for c in optional_df.columns if c.startswith("_")]
@@ -1057,9 +1346,19 @@ class SPARQLExecutor:
         
         if shared_cols:
             # Left outer join - keep all rows from df, add optional columns where matched
-            return df.join(optional_df, on=list(shared_cols), how="left")
+            result = df.join(optional_df, on=list(shared_cols), how="left")
+            
+            # Ensure all optional variables exist in result (may be null for non-matches)
+            for var_name in optional_variables:
+                if var_name not in result.columns:
+                    result = result.with_columns(pl.lit(None).alias(var_name))
+            
+            return result
         else:
-            # No shared columns - this is unusual for OPTIONAL, but handle it
+            # No shared columns - add null columns for optional variables
+            for var_name in optional_variables:
+                if var_name not in df.columns:
+                    df = df.with_columns(pl.lit(None).alias(var_name))
             return df
     
     def _apply_union(
@@ -1127,16 +1426,45 @@ class SPARQLExecutor:
         Execute a UNION pattern as a standalone query (no prior patterns).
         
         Returns combined results from all alternatives.
+        Parallelizes execution when multiple alternatives exist.
         """
-        union_results = []
+        alternatives = union.alternatives
         
-        for alternative in union.alternatives:
-            # Execute each alternative as a mini WHERE clause
-            alt_where = WhereClause(patterns=alternative)
-            alt_df = self._execute_where(alt_where, prefixes)
-            
-            if len(alt_df) > 0:
-                union_results.append(alt_df)
+        def build_where_clause(alternative):
+            """Build a WhereClause from a UNION alternative."""
+            if isinstance(alternative, dict):
+                # New format: dict with patterns, filters, binds
+                return WhereClause(
+                    patterns=alternative.get('patterns', []),
+                    filters=alternative.get('filters', []),
+                    binds=alternative.get('binds', [])
+                )
+            else:
+                # Legacy format: list of patterns
+                return WhereClause(patterns=alternative)
+        
+        # Parallel execution for multiple UNION branches
+        if self._parallel and len(alternatives) >= 2:
+            with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(alternatives))) as executor:
+                futures = []
+                for alternative in alternatives:
+                    alt_where = build_where_clause(alternative)
+                    future = executor.submit(self._execute_where, alt_where, prefixes)
+                    futures.append(future)
+                
+                union_results = []
+                for future in as_completed(futures):
+                    alt_df = future.result()
+                    if len(alt_df) > 0:
+                        union_results.append(alt_df)
+        else:
+            # Sequential execution
+            union_results = []
+            for alternative in alternatives:
+                alt_where = build_where_clause(alternative)
+                alt_df = self._execute_where(alt_where, prefixes)
+                if len(alt_df) > 0:
+                    union_results.append(alt_df)
         
         if not union_results:
             return pl.DataFrame()
@@ -1246,9 +1574,112 @@ class SPARQLExecutor:
             # Cross join - add all value combinations
             return df.join(values_df, how="cross")
     
+    def _apply_subselect(
+        self,
+        df: pl.DataFrame,
+        subselect: SubSelect,
+        prefixes: dict[str, str]
+    ) -> pl.DataFrame:
+        """
+        Apply a subquery (nested SELECT) to the current results.
+        
+        The subquery is executed independently and then joined with the
+        outer query on any shared variables.
+        
+        Example:
+            SELECT ?person ?avgAge WHERE {
+                ?person a foaf:Person .
+                {
+                    SELECT (AVG(?age) AS ?avgAge)
+                    WHERE { ?p foaf:age ?age }
+                }
+            }
+        """
+        # Execute the subquery's WHERE clause
+        subquery_df = self._execute_where(subselect.where, prefixes)
+        
+        if len(subquery_df) == 0:
+            return df
+        
+        # Apply GROUP BY if present
+        if subselect.group_by:
+            group_cols = [v.name for v in subselect.group_by]
+            
+            # Build aggregation expressions
+            agg_exprs = []
+            select_vars = []
+            
+            for var in subselect.variables:
+                if isinstance(var, Variable):
+                    select_vars.append(var.name)
+                elif isinstance(var, AggregateExpression):
+                    agg_expr = self._build_aggregate_expr(var)
+                    if agg_expr is not None:
+                        alias = var.alias.name if var.alias else f"_agg_{len(agg_exprs)}"
+                        agg_exprs.append(agg_expr.alias(alias))
+                        select_vars.append(alias)
+            
+            if group_cols:
+                subquery_df = subquery_df.group_by(group_cols).agg(agg_exprs)
+            elif agg_exprs:
+                # No GROUP BY but has aggregates - aggregate over entire result
+                subquery_df = subquery_df.select(agg_exprs)
+        else:
+            # No GROUP BY - just project the selected variables
+            select_vars = []
+            for var in subselect.variables:
+                if isinstance(var, Variable):
+                    select_vars.append(var.name)
+                elif isinstance(var, AggregateExpression):
+                    # Aggregate without GROUP BY
+                    agg_expr = self._build_aggregate_expr(var)
+                    if agg_expr is not None:
+                        alias = var.alias.name if var.alias else f"_agg"
+                        subquery_df = subquery_df.select(agg_expr.alias(alias))
+                        select_vars.append(alias)
+        
+        # Apply HAVING if present
+        if subselect.having:
+            subquery_df = self._apply_filter(subquery_df, subselect.having, prefixes)
+        
+        # Apply ORDER BY if present
+        if subselect.order_by:
+            order_cols = []
+            descending = []
+            for cond in subselect.order_by:
+                if isinstance(cond.expression, Variable):
+                    order_cols.append(cond.expression.name)
+                    descending.append(cond.descending)
+            if order_cols:
+                subquery_df = subquery_df.sort(order_cols, descending=descending)
+        
+        # Apply LIMIT/OFFSET
+        if subselect.offset:
+            subquery_df = subquery_df.slice(subselect.offset)
+        if subselect.limit:
+            subquery_df = subquery_df.head(subselect.limit)
+        
+        # Project only selected variables
+        available_cols = set(subquery_df.columns)
+        project_cols = [c for c in select_vars if c in available_cols]
+        if project_cols:
+            subquery_df = subquery_df.select(project_cols)
+        
+        # Join with outer query
+        if len(df) == 0 or len(df.columns) == 0:
+            return subquery_df
+        
+        shared_cols = set(df.columns) & set(subquery_df.columns)
+        
+        if shared_cols:
+            return df.join(subquery_df, on=list(shared_cols), how="inner")
+        else:
+            return df.join(subquery_df, how="cross")
+    
     def _build_filter_expression(
         self,
-        expr: Union[Comparison, LogicalExpression, FunctionCall]
+        expr: Union[Comparison, LogicalExpression, FunctionCall, ExistsExpression],
+        current_df: Optional[pl.DataFrame] = None
     ) -> Optional[pl.Expr]:
         """Build a Polars filter expression from SPARQL filter AST."""
         
@@ -1272,7 +1703,7 @@ class SPARQLExecutor:
         
         elif isinstance(expr, LogicalExpression):
             operand_exprs = [
-                self._build_filter_expression(op) for op in expr.operands
+                self._build_filter_expression(op, current_df) for op in expr.operands
             ]
             operand_exprs = [e for e in operand_exprs if e is not None]
             
@@ -1294,6 +1725,11 @@ class SPARQLExecutor:
         
         elif isinstance(expr, FunctionCall):
             return self._build_function_call(expr)
+        
+        elif isinstance(expr, ExistsExpression):
+            # EXISTS/NOT EXISTS is handled specially in _apply_filter
+            # Return a placeholder that will be evaluated there
+            return None
         
         return None
     
@@ -1411,8 +1847,133 @@ class SPARQLExecutor:
             if func.arguments and isinstance(func.arguments[0], Variable):
                 return pl.col(func.arguments[0].name).cast(pl.Utf8)
         
-        # Add more functions as needed
+        elif name == "COALESCE":
+            # COALESCE returns the first non-null argument
+            if func.arguments:
+                exprs = []
+                for arg in func.arguments:
+                    if isinstance(arg, Variable):
+                        exprs.append(pl.col(arg.name))
+                    elif isinstance(arg, Literal):
+                        exprs.append(pl.lit(arg.value))
+                if exprs:
+                    return pl.coalesce(exprs)
         
+        elif name == "IF":
+            # IF(condition, then_value, else_value)
+            if len(func.arguments) >= 3:
+                cond_expr = self._build_filter_expression(func.arguments[0])
+                then_expr = self._arg_to_expr(func.arguments[1])
+                else_expr = self._arg_to_expr(func.arguments[2])
+                if cond_expr is not None and then_expr is not None and else_expr is not None:
+                    return pl.when(cond_expr).then(then_expr).otherwise(else_expr)
+        
+        elif name == "LANG":
+            # Return language tag of a literal (simplified - returns empty string)
+            if func.arguments and isinstance(func.arguments[0], Variable):
+                # For now, literals don't carry language tags in our storage
+                return pl.lit("")
+        
+        elif name == "DATATYPE":
+            # Return datatype IRI of a literal
+            if func.arguments and isinstance(func.arguments[0], Variable):
+                col = pl.col(func.arguments[0].name)
+                # Heuristic: detect datatype from value pattern
+                return pl.when(col.str.contains(r"^\d+$")).then(pl.lit("http://www.w3.org/2001/XMLSchema#integer")) \
+                    .when(col.str.contains(r"^\d+\.\d+$")).then(pl.lit("http://www.w3.org/2001/XMLSchema#decimal")) \
+                    .when(col.str.to_lowercase().is_in(["true", "false"])).then(pl.lit("http://www.w3.org/2001/XMLSchema#boolean")) \
+                    .otherwise(pl.lit("http://www.w3.org/2001/XMLSchema#string"))
+        
+        elif name == "STRLEN":
+            if func.arguments and isinstance(func.arguments[0], Variable):
+                return pl.col(func.arguments[0].name).str.len_chars()
+        
+        elif name == "CONTAINS":
+            if len(func.arguments) >= 2:
+                str_expr = self._arg_to_expr(func.arguments[0])
+                pattern = self._arg_to_literal_value(func.arguments[1])
+                if str_expr is not None and pattern is not None:
+                    return str_expr.str.contains(pattern, literal=True)
+        
+        elif name == "STRSTARTS":
+            if len(func.arguments) >= 2:
+                str_expr = self._arg_to_expr(func.arguments[0])
+                prefix = self._arg_to_literal_value(func.arguments[1])
+                if str_expr is not None and prefix is not None:
+                    return str_expr.str.starts_with(prefix)
+        
+        elif name == "STRENDS":
+            if len(func.arguments) >= 2:
+                str_expr = self._arg_to_expr(func.arguments[0])
+                suffix = self._arg_to_literal_value(func.arguments[1])
+                if str_expr is not None and suffix is not None:
+                    return str_expr.str.ends_with(suffix)
+        
+        elif name == "LCASE":
+            if func.arguments and isinstance(func.arguments[0], Variable):
+                return pl.col(func.arguments[0].name).str.to_lowercase()
+        
+        elif name == "UCASE":
+            if func.arguments and isinstance(func.arguments[0], Variable):
+                return pl.col(func.arguments[0].name).str.to_uppercase()
+        
+        elif name == "CONCAT":
+            if func.arguments:
+                exprs = [self._arg_to_expr(arg) for arg in func.arguments]
+                if all(e is not None for e in exprs):
+                    return pl.concat_str(exprs)
+        
+        elif name == "REPLACE":
+            # REPLACE(str, pattern, replacement)
+            if len(func.arguments) >= 3:
+                str_expr = self._arg_to_expr(func.arguments[0])
+                pattern = self._arg_to_literal_value(func.arguments[1])
+                replacement = self._arg_to_literal_value(func.arguments[2])
+                if str_expr is not None and pattern and replacement is not None:
+                    return str_expr.str.replace_all(pattern, replacement)
+        
+        elif name == "ABS":
+            if func.arguments:
+                expr = self._arg_to_expr(func.arguments[0])
+                if expr is not None:
+                    return expr.abs()
+        
+        elif name == "ROUND":
+            if func.arguments:
+                expr = self._arg_to_expr(func.arguments[0])
+                if expr is not None:
+                    return expr.round(0)
+        
+        elif name == "CEIL":
+            if func.arguments:
+                expr = self._arg_to_expr(func.arguments[0])
+                if expr is not None:
+                    return expr.ceil()
+        
+        elif name == "FLOOR":
+            if func.arguments:
+                expr = self._arg_to_expr(func.arguments[0])
+                if expr is not None:
+                    return expr.floor()
+        
+        return None
+    
+    def _arg_to_expr(self, arg) -> Optional[pl.Expr]:
+        """Convert a function argument to a Polars expression."""
+        if isinstance(arg, Variable):
+            return pl.col(arg.name)
+        elif isinstance(arg, Literal):
+            return pl.lit(arg.value)
+        elif isinstance(arg, FunctionCall):
+            return self._build_function_call(arg)
+        elif isinstance(arg, Comparison):
+            return self._build_comparison(arg)
+        return None
+    
+    def _arg_to_literal_value(self, arg) -> Optional[str]:
+        """Extract a literal string value from an argument."""
+        if isinstance(arg, Literal):
+            return arg.value
         return None
     
     def _execute_insert_data(

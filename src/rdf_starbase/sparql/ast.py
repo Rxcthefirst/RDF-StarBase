@@ -115,6 +115,7 @@ class PropertyPathModifier(Enum):
     ZERO_OR_MORE = auto()   # *
     ONE_OR_MORE = auto()    # +
     ZERO_OR_ONE = auto()    # ?
+    FIXED_LENGTH = auto()   # {n,m}
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,29 @@ class PathMod(PropertyPath):
             PropertyPathModifier.ZERO_OR_ONE: "?",
         }[self.modifier]
         return f"{self.path}{mod}"
+
+
+@dataclass(frozen=True)
+class PathFixedLength(PropertyPath):
+    """
+    A fixed-length property path (path{n}, path{n,m}, path{n,}).
+    
+    Examples:
+        foaf:knows{2}     - exactly 2 hops
+        foaf:knows{2,4}   - 2 to 4 hops
+        foaf:knows{2,}    - 2 or more hops
+    """
+    path: PropertyPath
+    min_length: int
+    max_length: Optional[int]  # None means unbounded
+    
+    def __str__(self) -> str:
+        if self.max_length is None:
+            return f"{self.path}{{{self.min_length},}}"
+        elif self.min_length == self.max_length:
+            return f"{self.path}{{{self.min_length}}}"
+        else:
+            return f"{self.path}{{{self.min_length},{self.max_length}}}"
 
 
 @dataclass(frozen=True)
@@ -308,6 +332,25 @@ class FunctionCall:
 
 
 @dataclass
+class ExistsExpression:
+    """
+    EXISTS or NOT EXISTS pattern expression.
+    
+    Used in FILTER to check if a graph pattern matches.
+    
+    Examples:
+        FILTER EXISTS { ?person foaf:email ?email }
+        FILTER NOT EXISTS { ?person foaf:deceased ?date }
+    """
+    pattern: "WhereClause"  # The graph pattern to check
+    negated: bool = False  # True for NOT EXISTS
+    
+    def __str__(self) -> str:
+        prefix = "NOT EXISTS" if self.negated else "EXISTS"
+        return f"{prefix} {{ ... }}"
+
+
+@dataclass
 class AggregateExpression:
     """
     An aggregate function call (COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, SAMPLE).
@@ -349,7 +392,7 @@ SelectExpression = Union[Variable, AggregateExpression]
 @dataclass
 class Filter:
     """A FILTER clause constraining query results."""
-    expression: Union[Comparison, LogicalExpression, FunctionCall]
+    expression: Union[Comparison, LogicalExpression, FunctionCall, "ExistsExpression"]
     
     def __str__(self) -> str:
         return f"FILTER({self.expression})"
@@ -420,11 +463,13 @@ class OptionalPattern:
     An OPTIONAL graph pattern.
     
     OPTIONAL { ?s ?p ?o }
+    OPTIONAL { ?s ?p ?o . BIND(?o AS ?val) }
     
     Results include rows even if the optional pattern doesn't match.
     """
     patterns: list[Union[TriplePattern, QuotedTriplePattern, "OptionalPattern", "UnionPattern"]] = field(default_factory=list)
     filters: list[Filter] = field(default_factory=list)
+    binds: list["Bind"] = field(default_factory=list)
     
     def __str__(self) -> str:
         inner = " ".join(str(p) for p in self.patterns)
@@ -434,6 +479,8 @@ class OptionalPattern:
         vars = set()
         for pattern in self.patterns:
             vars.update(pattern.get_variables())
+        for bind in self.binds:
+            vars.add(bind.variable)
         return vars
 
 
@@ -464,6 +511,8 @@ class GraphPattern:
     """A named graph pattern: GRAPH <uri> { ... }"""
     graph: Union[Variable, IRI]
     patterns: list[Union[TriplePattern, QuotedTriplePattern]] = field(default_factory=list)
+    binds: list["Bind"] = field(default_factory=list)
+    filters: list["Filter"] = field(default_factory=list)
     
     def get_variables(self) -> set[Variable]:
         vars = set()
@@ -471,6 +520,8 @@ class GraphPattern:
             vars.add(self.graph)
         for pattern in self.patterns:
             vars.update(pattern.get_variables())
+        for bind in self.binds:
+            vars.add(bind.variable)
         return vars
 
 
@@ -498,7 +549,7 @@ class MinusPattern:
 
 
 # Type alias for patterns that can appear in WHERE
-WherePattern = Union[TriplePattern, QuotedTriplePattern, OptionalPattern, UnionPattern, GraphPattern, Bind, ValuesClause, MinusPattern]
+WherePattern = Union[TriplePattern, QuotedTriplePattern, OptionalPattern, UnionPattern, GraphPattern, Bind, ValuesClause, MinusPattern, "SubSelect"]
 
 
 # =============================================================================
@@ -516,6 +567,7 @@ class WhereClause:
     binds: list[Bind] = field(default_factory=list)
     values: Optional[ValuesClause] = None
     graph_patterns: list[GraphPattern] = field(default_factory=list)
+    subselects: list["SubSelect"] = field(default_factory=list)
     
     def get_all_variables(self) -> set[Variable]:
         """Return all variables used in this WHERE clause."""
@@ -531,7 +583,48 @@ class WhereClause:
             vars.update(minus.get_variables())
         for graph in self.graph_patterns:
             vars.update(graph.get_variables())
+        for sub in self.subselects:
+            vars.update(sub.get_variables())
         return vars
+
+
+@dataclass
+class SubSelect:
+    """
+    A subquery (nested SELECT) within a WHERE clause.
+    
+    Subqueries allow computing intermediate results within a larger query.
+    The subquery is evaluated first, then joined with the outer query.
+    
+    Example:
+        SELECT ?person ?avgAge WHERE {
+            ?person a foaf:Person .
+            {
+                SELECT (AVG(?age) AS ?avgAge)
+                WHERE { ?p foaf:age ?age }
+            }
+        }
+    """
+    variables: list[Union[Variable, "AggregateExpression"]]
+    where: "WhereClause"
+    distinct: bool = False
+    group_by: list[Variable] = field(default_factory=list)
+    having: Optional["Filter"] = None
+    order_by: list["OrderCondition"] = field(default_factory=list)
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+    
+    def get_variables(self) -> set[Variable]:
+        """Return variables projected by this subquery."""
+        vars = set()
+        for v in self.variables:
+            if isinstance(v, Variable):
+                vars.add(v)
+        return vars
+    
+    def __str__(self) -> str:
+        var_str = " ".join(str(v) for v in self.variables)
+        return f"{{ SELECT {var_str} WHERE {{ ... }} }}"
 
 
 @dataclass

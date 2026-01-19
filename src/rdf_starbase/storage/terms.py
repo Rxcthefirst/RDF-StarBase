@@ -275,6 +275,50 @@ class TermDict:
             return existing_id
         return None
     
+    def get_iri_id(self, iri: str) -> Optional[TermId]:
+        """
+        Fast lookup of IRI TermId without creating it.
+        
+        Uses the fast-path cache for O(1) lookup when the IRI
+        has been interned. Returns None if not found.
+        """
+        # Check fast-path cache first
+        cached = self._iri_cache.get(iri)
+        if cached is not None:
+            return cached
+        
+        # Fall back to hash lookup
+        term = Term.iri(iri)
+        return self.get_id(term)
+    
+    def get_literal_id(self, value: str, datatype: Optional[str] = None, lang: Optional[str] = None) -> Optional[TermId]:
+        """
+        Fast lookup of literal TermId without creating it.
+        
+        Uses fast-path cache for plain string literals.
+        Returns None if not found.
+        """
+        # Fast path for plain string literals
+        if lang is None and datatype is None:
+            cached = self._plain_literal_cache.get(value)
+            if cached is not None:
+                return cached
+        
+        # Build Term and do hash lookup
+        datatype_id = None
+        if lang is not None:
+            datatype_id = self.rdf_langstring_id
+        elif datatype:
+            datatype_id = self._iri_cache.get(datatype)
+            if datatype_id is None:
+                # Datatype IRI not interned, so literal can't exist
+                return None
+        else:
+            datatype_id = self.xsd_string_id
+        
+        term = Term.literal(value, datatype_id, lang)
+        return self.get_id(term)
+    
     def __len__(self) -> int:
         """Return the total number of interned terms."""
         return len(self._id_to_term)
