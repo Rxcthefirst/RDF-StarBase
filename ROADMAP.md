@@ -39,11 +39,13 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 
 **Goal:** PyPI publication, early adopter feedback
 
-- [ ] **PyPI publication** (`pip install rdf-starbase`)
-- [ ] **Documentation site** (GitHub Pages or ReadTheDocs)
-- [ ] **Quickstart guide** with runnable examples
-- [ ] **API reference** (auto-generated from docstrings)
-- [ ] **Benchmark reproducibility** (Docker or GitHub Actions)
+- [x] **PyPI publication** (`pip install rdf-starbase`) — Package builds successfully
+- [x] **CI/CD Pipeline** — GitHub Actions for test, benchmark, publish
+- [x] **Documentation site** — MkDocs + ReadTheDocs config
+- [x] **Quickstart guide** — `docs/quickstart.md`
+- [x] **API reference** — Auto-generated from docstrings
+- [x] **LICENSE file** — MIT License
+- [ ] **Benchmark reproducibility** — CI runs benchmarks on every push
 
 **Marketing:**
 - Add to Ontus.io product page
@@ -69,9 +71,9 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 - [ ] COALESCE, IF, BOUND functions
 
 #### Persistence Enhancements
-- [ ] SQLite backend option (single-file deployment)
-- [ ] DuckDB backend option (analytical workloads)
-- [ ] Incremental persistence (append-only)
+- [ ] DuckDB backend option (SQL interface to Parquet, analytical workloads)
+- [ ] Incremental persistence (append-only, avoid full rewrites)
+- [ ] Streaming load for large Parquet files
 
 ---
 

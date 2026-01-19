@@ -1,0 +1,42 @@
+site_name: RDF-StarBase
+site_description: A blazingly fast, provenance-native RDF-Star database
+site_url: https://rdf-starbase.readthedocs.io
+repo_url: https://github.com/ontus/rdf-starbase
+repo_name: ontus/rdf-starbase
+
+theme:
+  name: material
+  palette:
+    primary: indigo
+    accent: amber
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Architecture: ARCHITECTURE.md
+  - AI Grounding: AI_GROUNDING_GUIDE.md
+  - API Reference: api/index.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: true
+            show_root_heading: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - tables
