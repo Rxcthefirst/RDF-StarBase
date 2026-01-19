@@ -11,13 +11,16 @@ Provides endpoints for:
 """
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional, Union
 from uuid import UUID
 import json
+import os
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import polars as pl
 
@@ -559,8 +562,62 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
     return app
 
 
+def get_static_dir() -> Optional[Path]:
+    """Find the frontend static files directory."""
+    # Check various possible locations
+    candidates = [
+        Path(__file__).parent.parent.parent / "frontend" / "dist",  # Development
+        Path("/app/frontend/dist"),  # Docker
+        Path.cwd() / "frontend" / "dist",  # Current directory
+    ]
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "index.html").exists():
+            return candidate
+    return None
+
+
+def create_production_app() -> FastAPI:
+    """Create app with static file serving for production."""
+    base_app = create_app()
+    
+    static_dir = get_static_dir()
+    if static_dir:
+        # Mount static assets at /app/assets (matching Vite's base: '/app/')
+        assets_dir = static_dir / "assets"
+        if assets_dir.exists():
+            base_app.mount("/app/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+        
+        # Serve index.html for /app and /app/*
+        @base_app.get("/app", include_in_schema=False)
+        async def serve_spa_root():
+            return FileResponse(static_dir / "index.html")
+        
+        @base_app.get("/app/{path:path}", include_in_schema=False)
+        async def serve_spa(path: str = ""):
+            # Check if it's a static file request that wasn't caught by mount
+            file_path = static_dir / path
+            if file_path.exists() and file_path.is_file():
+                return FileResponse(file_path)
+            # Otherwise serve index.html for SPA routing
+            return FileResponse(static_dir / "index.html")
+        
+        # Serve favicon if present
+        favicon_path = static_dir / "favicon.ico"
+        if favicon_path.exists():
+            @base_app.get("/favicon.ico", include_in_schema=False)
+            async def favicon():
+                return FileResponse(favicon_path)
+    
+    return base_app
+
+
 # Default app instance for running directly
+# In production (Docker), use create_production_app()
 app = create_app()
+
+# Check if we should serve static files (production mode)
+if os.environ.get("RDFSTARBASE_SERVE_STATIC", "").lower() in ("1", "true", "yes"):
+    app = create_production_app()
 
 
 if __name__ == "__main__":

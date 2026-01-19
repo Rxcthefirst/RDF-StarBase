@@ -1,13 +1,21 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import * as d3 from 'd3'
+import SparqlEditor from './components/SparqlEditor'
+import SchemaBrowser from './components/SchemaBrowser'
+import ImportExport from './components/ImportExport'
+import {
+  DatabaseIcon, PlayIcon, PlusIcon, TrashIcon, FolderIcon,
+  TableIcon, NetworkIcon, CodeIcon, SunIcon, MoonIcon,
+  SearchIcon, SettingsIcon, BookIcon, ZapIcon, GlobeIcon,
+  ChevronDownIcon, CloseIcon, RefreshIcon
+} from './components/Icons'
 import './index.css'
 
-// API base URL - in dev mode, vite proxies /api to localhost:8000
-const API_BASE = '/api'
+// API base URL - in dev mode with Vite, use proxy; in production, use root
+const API_BASE = import.meta.env.DEV ? '/api' : ''
 
 // Fetch helpers
 async function fetchJson(endpoint, options = {}) {
-  console.log(`[API] Fetching ${API_BASE}${endpoint}`)
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
     headers: {
@@ -17,28 +25,213 @@ async function fetchJson(endpoint, options = {}) {
   })
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }))
-    console.error(`[API] Error: ${error.detail || response.statusText}`)
     throw new Error(error.detail || 'Request failed')
   }
-  const data = await response.json()
-  console.log(`[API] Response from ${endpoint}:`, data)
-  return data
+  return response.json()
 }
 
-// Repository selector for the selected project
-async function fetchRepoJson(repoName, endpoint, options = {}) {
-  return fetchJson(`/repositories/${repoName}${endpoint}`, options)
-}
-
-// Helper to extract local name from URI (checks # first, then /)
 const getLocalName = (uri) => {
   if (!uri) return uri
   if (uri.includes('#')) return uri.split('#').pop()
   return uri.split('/').pop()
 }
 
-// Create Project Modal Component
-function CreateProjectModal({ isOpen, onClose, onCreate }) {
+// ============================================================================
+// Graph Visualization Component
+// ============================================================================
+function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme }) {
+  const svgRef = useRef(null)
+  const [tooltip, setTooltip] = useState(null)
+  
+  useEffect(() => {
+    if (!svgRef.current) return
+    
+    const svg = d3.select(svgRef.current)
+    svg.selectAll('*').remove()
+    
+    if (!nodes.length) {
+      const isDark = theme === 'dark'
+      svg.append('text')
+        .attr('x', '50%')
+        .attr('y', '50%')
+        .attr('text-anchor', 'middle')
+        .attr('fill', isDark ? 'rgba(205, 214, 244, 0.5)' : 'rgba(30, 30, 30, 0.5)')
+        .attr('font-size', '1.25rem')
+        .text('No graph data to display')
+      svg.append('text')
+        .attr('x', '50%')
+        .attr('y', '55%')
+        .attr('text-anchor', 'middle')
+        .attr('fill', isDark ? 'rgba(205, 214, 244, 0.3)' : 'rgba(30, 30, 30, 0.3)')
+        .attr('font-size', '0.875rem')
+        .text('Run a query with URI relationships')
+      return
+    }
+    
+    const width = svgRef.current.clientWidth
+    const height = svgRef.current.clientHeight
+    const isDark = theme === 'dark'
+    
+    const zoom = d3.zoom()
+      .scaleExtent([0.1, 4])
+      .on('zoom', (event) => g.attr('transform', event.transform))
+    
+    svg.call(zoom)
+    
+    const g = svg.append('g')
+    
+    const simulation = d3.forceSimulation(nodes)
+      .force('link', d3.forceLink(edges).id(d => d.id).distance(150))
+      .force('charge', d3.forceManyBody().strength(-400))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collision', d3.forceCollide().radius(50))
+    
+    // Arrow marker
+    svg.append('defs').append('marker')
+      .attr('id', 'arrow')
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 28)
+      .attr('refY', 0)
+      .attr('markerWidth', 6)
+      .attr('markerHeight', 6)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('fill', isDark ? '#89b4fa' : '#1e66f5')
+      .attr('d', 'M0,-5L10,0L0,5')
+    
+    // Links
+    const link = g.append('g')
+      .selectAll('line')
+      .data(edges)
+      .join('line')
+      .attr('stroke', isDark ? '#585b70' : '#9ca0b0')
+      .attr('stroke-width', 2)
+      .attr('stroke-opacity', 0.6)
+      .attr('marker-end', 'url(#arrow)')
+      .on('mouseover', (event, d) => {
+        setTooltip({ x: event.pageX + 10, y: event.pageY + 10, content: d.predicate })
+        d3.select(event.currentTarget).attr('stroke-opacity', 1).attr('stroke-width', 3)
+      })
+      .on('mouseout', (event) => {
+        setTooltip(null)
+        d3.select(event.currentTarget).attr('stroke-opacity', 0.6).attr('stroke-width', 2)
+      })
+      .on('click', (event, d) => onEdgeClick && onEdgeClick(d))
+    
+    // Edge labels
+    const edgeLabels = g.append('g')
+      .selectAll('text')
+      .data(edges)
+      .join('text')
+      .text(d => d.label || getLocalName(d.predicate))
+      .attr('font-size', '11px')
+      .attr('fill', isDark ? '#a6adc8' : '#5c5f77')
+      .attr('text-anchor', 'middle')
+      .attr('pointer-events', 'none')
+    
+    // Nodes
+    const node = g.append('g')
+      .selectAll('g')
+      .data(nodes)
+      .join('g')
+      .attr('cursor', 'pointer')
+      .call(d3.drag()
+        .on('start', (event, d) => {
+          if (!event.active) simulation.alphaTarget(0.1).restart()
+          d.fx = d.x
+          d.fy = d.y
+        })
+        .on('drag', (event, d) => {
+          d.fx = event.x
+          d.fy = event.y
+        })
+        .on('end', (event, d) => {
+          if (!event.active) simulation.alphaTarget(0)
+        }))
+      .on('click', (event, d) => onNodeClick && onNodeClick(d))
+    
+    node.append('circle')
+      .attr('r', 18)
+      .attr('fill', isDark ? '#313244' : '#e6e9ef')
+      .attr('stroke', isDark ? '#89b4fa' : '#1e66f5')
+      .attr('stroke-width', 2)
+    
+    node.append('text')
+      .attr('dy', 35)
+      .attr('text-anchor', 'middle')
+      .attr('fill', isDark ? '#cdd6f4' : '#4c4f69')
+      .attr('font-size', '12px')
+      .attr('font-weight', '500')
+      .text(d => {
+        const label = d.label || getLocalName(d.id)
+        return label.length > 20 ? label.substring(0, 18) + '...' : label
+      })
+    
+    simulation.on('tick', () => {
+      link
+        .attr('x1', d => d.source.x)
+        .attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x)
+        .attr('y2', d => d.target.y)
+      
+      edgeLabels
+        .attr('x', d => (d.source.x + d.target.x) / 2)
+        .attr('y', d => (d.source.y + d.target.y) / 2 - 8)
+      
+      node.attr('transform', d => `translate(${d.x},${d.y})`)
+    })
+    
+    return () => simulation.stop()
+  }, [nodes, edges, theme, onNodeClick, onEdgeClick])
+  
+  return (
+    <div className="graph-container">
+      <svg ref={svgRef} className="graph-svg" />
+      {tooltip && (
+        <div className="tooltip" style={{ left: tooltip.x, top: tooltip.y }}>
+          {tooltip.content}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
+// Results Table Component
+// ============================================================================
+function ResultsTable({ results, columns, theme }) {
+  if (!results || results.length === 0) {
+    return <div className="empty-results">No results</div>
+  }
+  
+  return (
+    <div className="table-wrapper">
+      <table className={`results-table ${theme}`}>
+        <thead>
+          <tr>
+            {columns.map(col => <th key={col}>{col}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {results.map((row, i) => (
+            <tr key={i}>
+              {columns.map(col => (
+                <td key={col} title={String(row[col] ?? '')}>
+                  {String(row[col] ?? '')}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ============================================================================
+// Create Project Modal
+// ============================================================================
+function CreateProjectModal({ isOpen, onClose, onCreate, theme }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [error, setError] = useState(null)
@@ -51,7 +244,6 @@ function CreateProjectModal({ isOpen, onClose, onCreate }) {
       setError('Project name is required')
       return
     }
-    
     try {
       setCreating(true)
       setError(null)
@@ -68,156 +260,38 @@ function CreateProjectModal({ isOpen, onClose, onCreate }) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <h2>Create New Project</h2>
-        <div className="form-group">
-          <label>Project Name</label>
-          <input
-            type="text"
-            value={name}
-            onChange={e => setName(e.target.value)}
-            placeholder="my-project"
-            pattern="[a-zA-Z0-9\-_]+"
-            autoFocus
-          />
-          <small>Letters, numbers, hyphens, and underscores only</small>
+      <div className={`modal ${theme}`} onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Create New Repository</h2>
+          <button className="icon-btn" onClick={onClose}><CloseIcon size={20} /></button>
         </div>
-        <div className="form-group">
-          <label>Description (optional)</label>
-          <textarea
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="A brief description of your project..."
-            rows={3}
-          />
-        </div>
-        {error && <div className="error">{error}</div>}
-        <div className="modal-buttons">
-          <button className="btn btn-secondary" onClick={onClose} disabled={creating}>
-            Cancel
-          </button>
-          <button className="btn" onClick={handleCreate} disabled={creating}>
-            {creating ? 'Creating...' : 'Create Project'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Load Data Modal Component
-function LoadDataModal({ isOpen, onClose, onLoadExample, onLoadCustom, currentProject }) {
-  const [tab, setTab] = useState('examples')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
-  const [customQuery, setCustomQuery] = useState(`PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-PREFIX ex: <http://example.org/>
-
-INSERT DATA {
-  ex:person1 foaf:name "Alice" .
-  ex:person1 foaf:knows ex:person2 .
-  ex:person2 foaf:name "Bob" .
-}`)
-
-  const exampleDatasets = [
-    { id: 'movies', name: 'Movies & Directors', description: 'Film database with ratings from multiple sources' },
-    { id: 'techcorp', name: 'TechCorp Enterprise', description: 'Customer data with conflicts from 8 systems' },
-    { id: 'knowledge', name: 'Knowledge Graph', description: 'Academic entities with citations' },
-    { id: 'rdfstar', name: 'RDF-Star Demo', description: 'Quoted triples and nested annotations' },
-  ]
-
-  if (!isOpen) return null
-
-  const handleLoadExample = async (datasetId) => {
-    try {
-      setLoading(true)
-      setError(null)
-      await onLoadExample(datasetId)
-      onClose()
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleLoadCustom = async () => {
-    try {
-      setLoading(true)
-      setError(null)
-      await onLoadCustom(customQuery)
-      onClose()
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
-        <h2>Load Data into {currentProject}</h2>
-        
-        <div className="tabs" style={{ marginBottom: '1rem' }}>
-          <button 
-            className={`tab ${tab === 'examples' ? 'active' : ''}`}
-            onClick={() => setTab('examples')}
-          >
-            Example Datasets
-          </button>
-          <button 
-            className={`tab ${tab === 'custom' ? 'active' : ''}`}
-            onClick={() => setTab('custom')}
-          >
-            Custom SPARQL
-          </button>
-        </div>
-
-        {tab === 'examples' && (
-          <div className="dataset-grid">
-            {exampleDatasets.map(ds => (
-              <div key={ds.id} className="dataset-card">
-                <div className="dataset-name">{ds.name}</div>
-                <div className="dataset-desc">{ds.description}</div>
-                <button 
-                  className="btn btn-small"
-                  onClick={() => handleLoadExample(ds.id)}
-                  disabled={loading}
-                >
-                  {loading ? 'Loading...' : 'Load'}
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {tab === 'custom' && (
+        <div className="modal-body">
           <div className="form-group">
-            <label>SPARQL INSERT DATA Statement</label>
-            <textarea
-              className="sparql-input"
-              value={customQuery}
-              onChange={e => setCustomQuery(e.target.value)}
-              rows={10}
-              style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}
+            <label>Repository Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="my-knowledge-graph"
+              autoFocus
             />
-            <button 
-              className="btn"
-              onClick={handleLoadCustom}
-              disabled={loading}
-              style={{ marginTop: '0.5rem' }}
-            >
-              {loading ? 'Loading...' : 'Execute INSERT'}
-            </button>
+            <small>Letters, numbers, hyphens, and underscores only</small>
           </div>
-        )}
-
-        {error && <div className="error">{error}</div>}
-        
-        <div className="modal-buttons">
-          <button className="btn btn-secondary" onClick={onClose}>
-            Close
+          <div className="form-group">
+            <label>Description (optional)</label>
+            <textarea
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              placeholder="A brief description of your repository..."
+              rows={3}
+            />
+          </div>
+          {error && <div className="error-message">{error}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="btn secondary" onClick={onClose} disabled={creating}>Cancel</button>
+          <button className="btn primary" onClick={handleCreate} disabled={creating}>
+            {creating ? 'Creating...' : 'Create'}
           </button>
         </div>
       </div>
@@ -225,398 +299,91 @@ INSERT DATA {
   )
 }
 
-// Graph Visualization Component
-function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
-  const svgRef = useRef(null)
-  const [tooltip, setTooltip] = useState(null)
-  
-  useEffect(() => {
-    if (!svgRef.current) return
-    
-    const svg = d3.select(svgRef.current)
-    svg.selectAll('*').remove()
-    
-    if (!nodes.length) {
-      svg.append('text')
-        .attr('x', '50%')
-        .attr('y', '50%')
-        .attr('text-anchor', 'middle')
-        .attr('fill', 'rgba(255,255,255,0.5)')
-        .attr('font-size', '1.25rem')
-        .text('No graph data to display')
-      svg.append('text')
-        .attr('x', '50%')
-        .attr('y', '55%')
-        .attr('text-anchor', 'middle')
-        .attr('fill', 'rgba(255,255,255,0.3)')
-        .attr('font-size', '0.875rem')
-        .text('Run a query with URI relationships')
-      return
-    }
-    
-    const width = svgRef.current.clientWidth
-    const height = svgRef.current.clientHeight
-    
-    const zoom = d3.zoom()
-      .scaleExtent([0.1, 4])
-      .on('zoom', (event) => {
-        g.attr('transform', event.transform)
-      })
-    
-    svg.call(zoom)
-    
-    const g = svg.append('g')
-    
-    const simulation = d3.forceSimulation(nodes)
-      .force('link', d3.forceLink(edges).id(d => d.id).distance(150))
-      .force('charge', d3.forceManyBody().strength(-300))
-      .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collision', d3.forceCollide().radius(40))
-    
-    svg.append('defs').append('marker')
-      .attr('id', 'arrow')
-      .attr('viewBox', '0 -5 10 10')
-      .attr('refX', 25)
-      .attr('refY', 0)
-      .attr('markerWidth', 6)
-      .attr('markerHeight', 6)
-      .attr('orient', 'auto')
-      .append('path')
-      .attr('fill', 'rgba(233, 69, 96, 0.5)')
-      .attr('d', 'M0,-5L10,0L0,5')
-    
-    const link = g.append('g')
-      .selectAll('line')
-      .data(edges)
-      .join('line')
-      .attr('class', 'link')
-      .attr('marker-end', 'url(#arrow)')
-      .on('mouseover', (event, d) => {
-        setTooltip({
-          x: event.pageX + 10,
-          y: event.pageY + 10,
-          content: d.predicate
-        })
-      })
-      .on('mouseout', () => setTooltip(null))
-    
-    const edgeLabels = g.append('g')
-      .selectAll('text')
-      .data(edges)
-      .join('text')
-      .attr('class', 'edge-label')
-      .text(d => d.label || getLocalName(d.predicate))
-    
-    const node = g.append('g')
-      .selectAll('g')
-      .data(nodes)
-      .join('g')
-      .attr('class', d => `node ${selectedNode === d.id ? 'selected' : ''}`)
-      .call(d3.drag()
-        .on('start', (event, d) => {
-          if (!event.active) simulation.alphaTarget(0.01).restart()
-          d.fx = d.x
-          d.fy = d.y
-        })
-        .on('drag', (event, d) => {
-          d.fx = event.x
-          d.fy = event.y
-        })
-        .on('end', (event, d) => {
-          if (!event.active) simulation.alphaTarget(0)
-        }))
-      .on('click', (event, d) => onNodeClick(d))
-    
-    node.append('circle')
-      .attr('r', 15)
-    
-    node.append('text')
-      .attr('dy', 30)
-      .text(d => d.label || getLocalName(d.id))
-    
-    simulation.on('tick', () => {
-      link
-        .attr('x1', d => d.source.x)
-        .attr('y1', d => d.source.y)
-        .attr('x2', d => d.target.x)
-        .attr('y2', d => d.target.y)
-      
-      edgeLabels
-        .attr('x', d => (d.source.x + d.target.x) / 2)
-        .attr('y', d => (d.source.y + d.target.y) / 2)
-      
-      node.attr('transform', d => `translate(${d.x},${d.y})`)
-    })
-    
-    return () => simulation.stop()
-  }, [nodes, edges, selectedNode, onNodeClick])
-  
-  return (
-    <div className="graph-container">
-      <svg ref={svgRef} className="graph-svg" />
-      {tooltip && (
-        <div 
-          className="tooltip" 
-          style={{ left: tooltip.x, top: tooltip.y }}
-        >
-          {tooltip.content}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// Node Info Panel Component
-function NodeInfoPanel({ node, triples, onClose }) {
-  if (!node) return null
-  
-  return (
-    <div className="info-panel">
-      <button className="close-btn" onClick={onClose}>&times;</button>
-      <h3>{node.label || getLocalName(node.id)}</h3>
-      <div className="triple-item" style={{ background: 'none', padding: 0 }}>
-        <code style={{ fontSize: '0.7rem', wordBreak: 'break-all', color: 'rgba(255,255,255,0.5)' }}>
-          {node.id}
-        </code>
-      </div>
-      <div className="section-title" style={{ marginTop: '1rem' }}>Properties</div>
-      <div className="triple-list">
-        {triples.map((t, i) => (
-          <div key={i} className="triple-item">
-            <span className="predicate">{getLocalName(t.predicate)}</span>
-            {'  '}
-            <span className="object">{t.object}</span>
-            <div className="meta">
-              Source: {t.source} | Confidence: {(t.confidence * 100).toFixed(0)}%
-            </div>
-          </div>
-        ))}
-        {triples.length === 0 && (
-          <div style={{ color: 'rgba(255,255,255,0.5)' }}>No properties found</div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// Results Table Component  
-function ResultsTable({ results, columns }) {
-  if (!results || results.length === 0) {
-    return <div className="empty-results">No results</div>
-  }
-  
-  return (
-    <div className="results-container">
-      <table className="results-table">
-        <thead>
-          <tr>
-            {columns.map(col => (
-              <th key={col}>{col}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {results.map((row, i) => (
-            <tr key={i}>
-              {columns.map(col => (
-                <td key={col}>{String(row[col] ?? '')}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-// Raw JSON View Component
-function RawView({ data }) {
-  return (
-    <div className="raw-view">
-      <pre>{JSON.stringify(data, null, 2)}</pre>
-    </div>
-  )
-}
-
-// Query Results Panel - shows results in different views
-function QueryResultsPanel({ 
-  queryResults, 
-  viewMode, 
-  setViewMode, 
-  graphNodes, 
-  graphEdges,
-  selectedNode,
-  onNodeClick,
-  nodeTriples,
-  onCloseNodePanel
-}) {
-  const canShowGraph = graphNodes.length > 0 || graphEdges.length > 0
-  
-  return (
-    <div className="results-panel">
-      <div className="view-toggle">
-        <button 
-          className={`view-btn ${viewMode === 'graph' ? 'active' : ''}`}
-          onClick={() => setViewMode('graph')}
-          disabled={!canShowGraph}
-          title={canShowGraph ? 'Graph View' : 'No graph relationships in results'}
-        >
-          <svg viewBox="0 0 24 24" width="16" height="16">
-            <circle cx="5" cy="12" r="3" fill="currentColor"/>
-            <circle cx="19" cy="6" r="3" fill="currentColor"/>
-            <circle cx="19" cy="18" r="3" fill="currentColor"/>
-            <line x1="8" y1="12" x2="16" y2="7" stroke="currentColor" strokeWidth="2"/>
-            <line x1="8" y1="12" x2="16" y2="17" stroke="currentColor" strokeWidth="2"/>
-          </svg>
-          Graph
-        </button>
-        <button 
-          className={`view-btn ${viewMode === 'table' ? 'active' : ''}`}
-          onClick={() => setViewMode('table')}
-        >
-          <svg viewBox="0 0 24 24" width="16" height="16">
-            <rect x="3" y="3" width="18" height="4" fill="currentColor"/>
-            <rect x="3" y="9" width="18" height="3" fill="currentColor" opacity="0.7"/>
-            <rect x="3" y="14" width="18" height="3" fill="currentColor" opacity="0.5"/>
-            <rect x="3" y="19" width="18" height="2" fill="currentColor" opacity="0.3"/>
-          </svg>
-          Table
-        </button>
-        <button 
-          className={`view-btn ${viewMode === 'raw' ? 'active' : ''}`}
-          onClick={() => setViewMode('raw')}
-        >
-          <svg viewBox="0 0 24 24" width="16" height="16">
-            <text x="4" y="16" fontSize="12" fill="currentColor">{ }</text>
-          </svg>
-          Raw
-        </button>
-        
-        {queryResults && (
-          <span className="result-info">
-            {queryResults.type === 'select' && `${queryResults.results?.length || 0} rows`}
-            {queryResults.type === 'ask' && (queryResults.result ? ' TRUE' : ' FALSE')}
-            {queryResults.type === 'update' && `${queryResults.affected || 0} affected`}
-            {queryResults.type === 'construct' && `${queryResults.triples?.length || 0} triples`}
-          </span>
-        )}
-      </div>
-      
-      <div className="results-content">
-        {viewMode === 'graph' && (
-          <>
-            <GraphView
-              nodes={graphNodes}
-              edges={graphEdges}
-              selectedNode={selectedNode}
-              onNodeClick={onNodeClick}
-            />
-            {selectedNode && (
-              <NodeInfoPanel
-                node={graphNodes.find(n => n.id === selectedNode)}
-                triples={nodeTriples}
-                onClose={onCloseNodePanel}
-              />
-            )}
-          </>
-        )}
-        
-        {viewMode === 'table' && queryResults && (
-          <>
-            {queryResults.type === 'select' && (
-              <ResultsTable 
-                results={queryResults.results} 
-                columns={queryResults.columns} 
-              />
-            )}
-            {queryResults.type === 'ask' && (
-              <div className="ask-result">
-                <div className={`ask-value ${queryResults.result ? 'true' : 'false'}`}>
-                  {queryResults.result ? 'TRUE' : 'FALSE'}
-                </div>
-              </div>
-            )}
-            {queryResults.type === 'update' && (
-              <div className="update-result">
-                <div className="update-message"> Update executed successfully</div>
-                <div className="update-details">{queryResults.affected || 0} triples affected</div>
-              </div>
-            )}
-            {queryResults.type === 'construct' && (
-              <ResultsTable 
-                results={queryResults.triples?.map(t => ({
-                  subject: t.subject,
-                  predicate: t.predicate,
-                  object: t.object
-                })) || []} 
-                columns={['subject', 'predicate', 'object']} 
-              />
-            )}
-          </>
-        )}
-        
-        {viewMode === 'raw' && queryResults && (
-          <RawView data={queryResults} />
-        )}
-        
-        {!queryResults && viewMode !== 'graph' && (
-          <div className="empty-results">Run a query to see results</div>
-        )}
-      </div>
-    </div>
-  )
-}
-
+// ============================================================================
 // Main App Component
+// ============================================================================
 function App() {
-  const [projects, setProjects] = useState([])
-  const [currentProject, setCurrentProject] = useState(null)
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const [showLoadDataModal, setShowLoadDataModal] = useState(false)
+  // Theme state
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('rdf-starbase-theme')
+    return saved || 'dark'
+  })
   
+  // Repository state
+  const [repositories, setRepositories] = useState([])
+  const [currentRepo, setCurrentRepo] = useState(null)
+  const [showCreateModal, setShowCreateModal] = useState(false)
   const [stats, setStats] = useState(null)
+  
+  // Query state
+  const [sparqlQuery, setSparqlQuery] = useState('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
+  const [queryResults, setQueryResults] = useState(null)
+  const [executing, setExecuting] = useState(false)
+  const [error, setError] = useState(null)
+  
+  // View state
+  const [viewMode, setViewMode] = useState('table') // 'table' | 'graph' | 'json'
+  const [sidePanel, setSidePanel] = useState('schema') // 'schema' | 'import' | null
   const [graphNodes, setGraphNodes] = useState([])
   const [graphEdges, setGraphEdges] = useState([])
   const [selectedNode, setSelectedNode] = useState(null)
-  const [nodeTriples, setNodeTriples] = useState([])
-  const [sources, setSources] = useState([])
-  const [sparqlQuery, setSparqlQuery] = useState('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
-  const [queryResults, setQueryResults] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [executing, setExecuting] = useState(false)
-  const [error, setError] = useState(null)
-  const [viewMode, setViewMode] = useState('graph')
-  const [sidebarTab, setSidebarTab] = useState('projects')
-  const [apiStatus, setApiStatus] = useState('checking')
+  const [selectedEdge, setSelectedEdge] = useState(null)
+  const [nodeProperties, setNodeProperties] = useState(null)
   
-  const loadProjects = useCallback(async () => {
+  // API state
+  const [apiStatus, setApiStatus] = useState('checking')
+  const [loading, setLoading] = useState(true)
+
+  // Theme effect
+  useEffect(() => {
+    localStorage.setItem('rdf-starbase-theme', theme)
+    document.documentElement.setAttribute('data-theme', theme)
+  }, [theme])
+
+  // Load repositories
+  const loadRepositories = useCallback(async () => {
     try {
       const data = await fetchJson('/repositories')
-      setProjects(data.repositories || [])
+      setRepositories(data.repositories || [])
       return data.repositories || []
     } catch (err) {
-      console.error('[App] Failed to load projects:', err)
+      console.error('Failed to load repositories:', err)
       return []
     }
   }, [])
-  
-  const createProject = useCallback(async (name, description) => {
+
+  // Load stats
+  const loadStats = useCallback(async (repoName) => {
+    if (!repoName) {
+      setStats(null)
+      return
+    }
+    try {
+      const data = await fetchJson(`/repositories/${repoName}/stats`)
+      setStats(data.stats)
+    } catch (err) {
+      console.error('Failed to load stats:', err)
+    }
+  }, [])
+
+  // Create repository
+  const createRepository = useCallback(async (name, description) => {
     await fetchJson('/repositories', {
       method: 'POST',
       body: JSON.stringify({ name, description, tags: [] }),
     })
-    await loadProjects()
-    setCurrentProject(name)
-  }, [loadProjects])
-  
-  const deleteProject = useCallback(async (name) => {
-    if (!confirm(`Delete project "${name}"? This cannot be undone.`)) return
-    
+    await loadRepositories()
+    setCurrentRepo(name)
+  }, [loadRepositories])
+
+  // Delete repository
+  const deleteRepository = useCallback(async (name) => {
+    if (!confirm(`Delete repository "${name}"? This cannot be undone.`)) return
     try {
       await fetchJson(`/repositories/${name}?force=true`, { method: 'DELETE' })
-      await loadProjects()
-      if (currentProject === name) {
-        setCurrentProject(null)
+      await loadRepositories()
+      if (currentRepo === name) {
+        setCurrentRepo(null)
         setGraphNodes([])
         setGraphEdges([])
         setStats(null)
@@ -625,46 +392,22 @@ function App() {
     } catch (err) {
       setError(err.message)
     }
-  }, [currentProject, loadProjects])
-  
-  const loadProjectStats = useCallback(async (projectName) => {
-    if (!projectName) {
-      setStats(null)
-      return
-    }
-    
-    try {
-      const statsData = await fetchRepoJson(projectName, '/stats')
-      setStats(statsData.stats)
-    } catch (err) {
-      console.error('[App] Failed to load project stats:', err)
-    }
-  }, [])
-  
-  const buildGraphFromResults = useCallback((results, columns) => {
+  }, [currentRepo, loadRepositories])
+
+  // Build graph from results
+  const buildGraph = useCallback((results, columns) => {
     const nodeSet = new Set()
     const edgeList = []
+    const hasTriples = columns.includes('s') && columns.includes('p') && columns.includes('o')
     
-    const hasTriplePattern = columns.includes('s') && columns.includes('p') && columns.includes('o')
-    
-    if (hasTriplePattern) {
+    if (hasTriples) {
       for (const row of results) {
-        const subject = row.s
-        const predicate = row.p
-        const obj = row.o
-        
-        if (!subject || !predicate || !obj) continue
-        
-        nodeSet.add(subject)
-        
-        if (typeof obj === 'string' && (obj.startsWith('http') || obj.startsWith('urn:'))) {
-          nodeSet.add(obj)
-          edgeList.push({
-            source: subject,
-            target: obj,
-            predicate: predicate,
-            label: getLocalName(predicate),
-          })
+        const { s, p, o } = row
+        if (!s || !p || !o) continue
+        nodeSet.add(s)
+        if (typeof o === 'string' && (o.startsWith('http') || o.startsWith('urn:'))) {
+          nodeSet.add(o)
+          edgeList.push({ source: s, target: o, predicate: p, label: getLocalName(p) })
         }
       }
     } else {
@@ -678,19 +421,17 @@ function App() {
       }
     }
     
-    const nodes = [...nodeSet].map(id => ({
-      id,
-      label: getLocalName(id)
-    }))
-    
-    return { nodes, edges: edgeList }
+    return {
+      nodes: [...nodeSet].map(id => ({ id, label: getLocalName(id) })),
+      edges: edgeList
+    }
   }, [])
-  
+
+  // Execute SPARQL
   const executeSparql = useCallback(async (query = null) => {
-    const queryToRun = query || sparqlQuery
-    
-    if (!currentProject) {
-      setError('Please select or create a project first')
+    const q = query || sparqlQuery
+    if (!currentRepo) {
+      setError('Please select or create a repository first')
       return
     }
     
@@ -698,317 +439,455 @@ function App() {
       setError(null)
       setExecuting(true)
       
-      const result = await fetchRepoJson(currentProject, '/sparql', {
+      const result = await fetchJson(`/repositories/${currentRepo}/sparql`, {
         method: 'POST',
-        body: JSON.stringify({ query: queryToRun }),
+        body: JSON.stringify({ query: q }),
       })
       
       setQueryResults(result)
       
       if (result.type === 'select' && result.results) {
-        const { nodes, edges } = buildGraphFromResults(result.results, result.columns)
+        const { nodes, edges } = buildGraph(result.results, result.columns)
         setGraphNodes(nodes)
         setGraphEdges(edges)
-        
-        if (edges.length > 0) {
+        if (edges.length > 0 && viewMode !== 'json') {
           setViewMode('graph')
-        } else if (nodes.length === 0) {
-          setViewMode('table')
         }
       } else if (result.type === 'construct' && result.triples) {
         const nodeSet = new Set()
         const edgeList = []
-        
-        for (const triple of result.triples) {
-          nodeSet.add(triple.subject)
-          if (triple.object.startsWith('http') || triple.object.startsWith('urn:')) {
-            nodeSet.add(triple.object)
-            edgeList.push({
-              source: triple.subject,
-              target: triple.object,
-              predicate: triple.predicate,
-              label: getLocalName(triple.predicate),
-            })
+        for (const t of result.triples) {
+          nodeSet.add(t.subject)
+          if (t.object.startsWith('http') || t.object.startsWith('urn:')) {
+            nodeSet.add(t.object)
+            edgeList.push({ source: t.subject, target: t.object, predicate: t.predicate, label: getLocalName(t.predicate) })
           }
         }
-        
         setGraphNodes([...nodeSet].map(id => ({ id, label: getLocalName(id) })))
         setGraphEdges(edgeList)
-        setViewMode(edgeList.length > 0 ? 'graph' : 'table')
       } else {
         setGraphNodes([])
         setGraphEdges([])
-        setViewMode('table')
       }
       
       if (result.type === 'update') {
-        await loadProjectStats(currentProject)
-        await loadProjects()
+        await loadStats(currentRepo)
+        await loadRepositories()
       }
     } catch (err) {
       setError(err.message)
     } finally {
       setExecuting(false)
     }
-  }, [currentProject, sparqlQuery, buildGraphFromResults, loadProjectStats, loadProjects])
-  
-  const loadExampleDataset = useCallback(async (datasetId) => {
-    if (!currentProject) throw new Error('No project selected')
-    
-    await fetchRepoJson(currentProject, `/load-example/${datasetId}`, {
-      method: 'POST',
-    })
-    
-    await loadProjectStats(currentProject)
-    await loadProjects()
-    await executeSparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
-  }, [currentProject, loadProjectStats, loadProjects, executeSparql])
-  
-  const loadCustomData = useCallback(async (sparqlQuery) => {
-    if (!currentProject) throw new Error('No project selected')
-    
-    await fetchRepoJson(currentProject, '/sparql', {
-      method: 'POST',
-      body: JSON.stringify({ query: sparqlQuery }),
-    })
-    
-    await loadProjectStats(currentProject)
-    await loadProjects()
-    await executeSparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
-  }, [currentProject, loadProjectStats, loadProjects, executeSparql])
-  
+  }, [currentRepo, sparqlQuery, buildGraph, loadStats, loadRepositories, viewMode])
+
+  // Initialize
   useEffect(() => {
     async function init() {
       try {
         setLoading(true)
-        setError(null)
-        setApiStatus('checking')
-        
         await fetchJson('/health')
         setApiStatus('online')
-        
-        const repos = await loadProjects()
-        
-        try {
-          const sourcesData = await fetchJson('/sources')
-          setSources(sourcesData.sources || [])
-        } catch (e) {
-          console.warn('[App] Could not load sources:', e)
-        }
-        
+        const repos = await loadRepositories()
         if (repos.length > 0) {
-          setCurrentProject(repos[0].name)
+          setCurrentRepo(repos[0].name)
         }
       } catch (err) {
-        console.error('[App] Failed to initialize:', err)
         setApiStatus('offline')
         setError(err.message)
       } finally {
         setLoading(false)
       }
     }
-    
     init()
-  }, [loadProjects])
-  
+  }, [loadRepositories])
+
+  // Load stats when repo changes
   useEffect(() => {
-    if (currentProject && apiStatus === 'online') {
-      loadProjectStats(currentProject)
+    if (currentRepo && apiStatus === 'online') {
+      loadStats(currentRepo)
       executeSparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
-    } else {
-      setGraphNodes([])
-      setGraphEdges([])
-      setQueryResults(null)
     }
-  }, [currentProject, apiStatus, loadProjectStats])
-  
+  }, [currentRepo, apiStatus])
+
+  // Handle node click - fetch properties with provenance
   const handleNodeClick = useCallback(async (node) => {
-    setSelectedNode(node.id)
-    
-    if (!currentProject) {
-      setNodeTriples([])
-      return
-    }
+    setSelectedNode(node)
+    setSelectedEdge(null)
+    if (!currentRepo) return
     
     try {
-      const triples = await fetchRepoJson(currentProject, `/triples?subject=${encodeURIComponent(node.id)}`)
-      setNodeTriples(triples.triples)
+      // Query for all properties of this node with provenance
+      const query = `
+        SELECT ?p ?o ?source ?confidence WHERE {
+          <${node.id}> ?p ?o .
+          OPTIONAL {
+            << <${node.id}> ?p ?o >> <http://rdf-starbase.dev/source> ?source .
+            << <${node.id}> ?p ?o >> <http://rdf-starbase.dev/confidence> ?confidence .
+          }
+        }
+      `
+      const response = await fetchJson(`/repositories/${currentRepo}/query`, {
+        method: 'POST',
+        body: JSON.stringify({ query }),
+      })
+      setNodeProperties(response.results || [])
     } catch (err) {
-      console.error('Failed to load node triples:', err)
-      setNodeTriples([])
+      console.error('Failed to load node properties:', err)
+      setNodeProperties([])
     }
-  }, [currentProject])
-  
+  }, [currentRepo])
+
+  // Handle edge click
+  const handleEdgeClick = useCallback(async (edge) => {
+    setSelectedEdge(edge)
+    setSelectedNode(null)
+    // Edge already contains source, target, predicate
+    // Could query for provenance here if needed
+  }, [])
+
+  // Handle schema insert
+  const handleSchemaInsert = (snippet) => {
+    setSparqlQuery(prev => {
+      const whereMatch = prev.match(/WHERE\s*\{/i)
+      if (whereMatch) {
+        const insertPos = whereMatch.index + whereMatch[0].length
+        return prev.slice(0, insertPos) + '\n  ' + snippet + prev.slice(insertPos)
+      }
+      return prev + '\n' + snippet
+    })
+  }
+
+  // Sample queries
   const sampleQueries = [
-    { label: '📊 Show All', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100' },
-    { label: '⭐ With Provenance', query: 'SELECT ?s ?p ?o ?source ?confidence WHERE { ?s ?p ?o } LIMIT 100' },
-    { label: '🔗 Links Only', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?o)) } LIMIT 100' },
-    { label: '❓ ASK', query: 'ASK WHERE { ?s ?p ?o }' },
+    { icon: '📊', label: 'All Triples', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100' },
+    { icon: '🔗', label: 'Relationships', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?o)) } LIMIT 100' },
+    { icon: '📈', label: 'Statistics', query: 'SELECT ?p (COUNT(*) AS ?count) WHERE { ?s ?p ?o } GROUP BY ?p ORDER BY DESC(?count)' },
+    { icon: '🏷️', label: 'Classes', query: 'SELECT ?class (COUNT(?s) AS ?count) WHERE { ?s a ?class } GROUP BY ?class ORDER BY DESC(?count)' },
   ]
-  
+
+  // Offline screen
   if (apiStatus === 'offline') {
     return (
-      <div className="app">
-        <div className="api-offline">
-          <div className="offline-icon"></div>
-          <h2>API Server Not Running</h2>
-          <p>The RDF-StarBase API server is not responding.</p>
-          <div className="offline-instructions">
-            <h3>To start the server:</h3>
-            <code>cd e:\RDF-StarBase</code>
-            <code>uvicorn rdf_starbase.repository_api:app --reload</code>
+      <div className={`app ${theme}`}>
+        <div className="offline-screen">
+          <div className="offline-content">
+            <DatabaseIcon size={64} />
+            <h2>API Server Not Running</h2>
+            <p>The RDF-StarBase API server is not responding.</p>
+            <div className="offline-instructions">
+              <h3>To start the server:</h3>
+              <code>cd e:\RDF-StarBase</code>
+              <code>uvicorn rdf_starbase.repository_api:app --reload</code>
+            </div>
+            <button className="btn primary" onClick={() => window.location.reload()}>
+              <RefreshIcon size={16} /> Retry Connection
+            </button>
           </div>
-          <button className="btn" onClick={() => window.location.reload()}>Retry Connection</button>
         </div>
       </div>
     )
   }
-  
+
   if (loading) {
     return (
-      <div className="app">
-        <div className="loading">Connecting to RDF-StarBase API...</div>
+      <div className={`app ${theme}`}>
+        <div className="loading-screen">
+          <div className="spinner" />
+          <p>Connecting to RDF-StarBase...</p>
+        </div>
       </div>
     )
   }
-  
+
   return (
-    <div className="app">
+    <div className={`app ${theme}`}>
       <CreateProjectModal
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
-        onCreate={createProject}
+        onCreate={createRepository}
+        theme={theme}
       />
-      
-      <LoadDataModal
-        isOpen={showLoadDataModal}
-        onClose={() => setShowLoadDataModal(false)}
-        onLoadExample={loadExampleDataset}
-        onLoadCustom={loadCustomData}
-        currentProject={currentProject}
-      />
-      
-      <header className="header">
-        <h1>
-          <svg className="logo" viewBox="0 0 24 24">
-            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-          </svg>
-          RDF-StarBase
-        </h1>
-        
-        <div className="project-selector">
-          <select
-            value={currentProject || ''}
-            onChange={(e) => setCurrentProject(e.target.value || null)}
-            className="project-dropdown"
-          >
-            <option value="">Select a project...</option>
-            {projects.map(p => (
-              <option key={p.name} value={p.name}>
-                {p.name} ({p.triple_count} triples)
-              </option>
-            ))}
-          </select>
-          <button className="btn btn-small" onClick={() => setShowCreateModal(true)} title="Create New Project">+ New</button>
-          <button className="btn btn-small btn-secondary" onClick={() => setShowLoadDataModal(true)} title="Load Data" disabled={!currentProject}> Load</button>
+
+      {/* Header */}
+      <header className="app-header">
+        <div className="header-left">
+          <div className="logo">
+            <DatabaseIcon size={24} />
+            <span>RDF-StarBase</span>
+          </div>
         </div>
-        
-        {stats && currentProject && (
-          <div className="stats-bar">
-            <span>Triples: <span className="value">{stats.total_assertions || 0}</span></span>
-            <span>Subjects: <span className="value">{stats.unique_subjects || 0}</span></span>
-            <span>Sources: <span className="value">{stats.unique_sources || 0}</span></span>
+
+        <div className="header-center">
+          <div className="repo-selector">
+            <select
+              value={currentRepo || ''}
+              onChange={(e) => setCurrentRepo(e.target.value || null)}
+            >
+              <option value="">Select repository...</option>
+              {repositories.map(r => (
+                <option key={r.name} value={r.name}>
+                  {r.name} ({r.triple_count} triples)
+                </option>
+              ))}
+            </select>
+            <button className="icon-btn" onClick={() => setShowCreateModal(true)} title="Create repository">
+              <PlusIcon size={18} />
+            </button>
+            {currentRepo && (
+              <button className="icon-btn danger" onClick={() => deleteRepository(currentRepo)} title="Delete repository">
+                <TrashIcon size={18} />
+              </button>
+            )}
           </div>
-        )}
+        </div>
+
+        <div className="header-right">
+          {stats && (
+            <div className="stats">
+              <span><strong>{stats.total_assertions || 0}</strong> triples</span>
+              <span><strong>{stats.unique_subjects || 0}</strong> subjects</span>
+            </div>
+          )}
+          <button 
+            className="icon-btn theme-toggle" 
+            onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          >
+            {theme === 'dark' ? <SunIcon size={18} /> : <MoonIcon size={18} />}
+          </button>
+        </div>
       </header>
-      
-      <div className="main-content">
-        <aside className="sidebar">
-          <div className="tabs">
-            <button className={`tab ${sidebarTab === 'projects' ? 'active' : ''}`} onClick={() => setSidebarTab('projects')}>Projects</button>
-            <button className={`tab ${sidebarTab === 'sources' ? 'active' : ''}`} onClick={() => setSidebarTab('sources')}>Sources</button>
+
+      {/* Main Content */}
+      <main className="app-main">
+        {/* Query Panel */}
+        <div className="query-panel">
+          <div className="query-toolbar">
+            <div className="quick-queries">
+              {sampleQueries.map((sq, i) => (
+                <button
+                  key={i}
+                  className="quick-query-btn"
+                  onClick={() => { setSparqlQuery(sq.query); executeSparql(sq.query) }}
+                  title={sq.query}
+                >
+                  {sq.icon} {sq.label}
+                </button>
+              ))}
+            </div>
+            <button 
+              className="btn primary execute-btn"
+              onClick={() => executeSparql()}
+              disabled={executing || !currentRepo}
+            >
+              <PlayIcon size={16} />
+              {executing ? 'Running...' : 'Run Query'}
+            </button>
           </div>
-          
-          {sidebarTab === 'projects' && (
-            <div className="section">
-              <div className="section-title">
-                Your Projects
-                <button className="btn btn-small" style={{ marginLeft: 'auto' }} onClick={() => setShowCreateModal(true)}>+ New</button>
+
+          <div className="editor-container">
+            <SparqlEditor
+              value={sparqlQuery}
+              onChange={setSparqlQuery}
+              onExecute={() => executeSparql()}
+              theme={theme}
+              height="180px"
+            />
+          </div>
+
+          {error && (
+            <div className="error-bar">
+              <span>{error}</span>
+              <button onClick={() => setError(null)}><CloseIcon size={14} /></button>
+            </div>
+          )}
+        </div>
+
+        {/* Results Area */}
+        <div className="results-area">
+          <div className="results-toolbar">
+            <div className="view-tabs">
+              <button 
+                className={`view-tab ${viewMode === 'table' ? 'active' : ''}`}
+                onClick={() => setViewMode('table')}
+              >
+                <TableIcon size={16} /> Table
+              </button>
+              <button 
+                className={`view-tab ${viewMode === 'graph' ? 'active' : ''}`}
+                onClick={() => setViewMode('graph')}
+                disabled={graphNodes.length === 0}
+              >
+                <NetworkIcon size={16} /> Graph
+              </button>
+              <button 
+                className={`view-tab ${viewMode === 'json' ? 'active' : ''}`}
+                onClick={() => setViewMode('json')}
+              >
+                <CodeIcon size={16} /> JSON
+              </button>
+            </div>
+
+            {queryResults && (
+              <div className="result-info">
+                {queryResults.type === 'select' && `${queryResults.results?.length || 0} rows`}
+                {queryResults.type === 'ask' && (queryResults.result ? '✓ TRUE' : '✗ FALSE')}
+                {queryResults.type === 'update' && `${queryResults.affected || 0} affected`}
+                {queryResults.type === 'construct' && `${queryResults.triples?.length || 0} triples`}
               </div>
-              <div className="project-list">
-                {projects.length === 0 ? (
-                  <div className="empty-state">
-                    <p>No projects yet</p>
-                    <button className="btn" onClick={() => setShowCreateModal(true)}>Create Your First Project</button>
-                  </div>
-                ) : (
-                  projects.map(p => (
-                    <div key={p.name} className={`project-item ${currentProject === p.name ? 'active' : ''}`} onClick={() => setCurrentProject(p.name)}>
-                      <div className="project-name">{p.name}</div>
-                      <div className="project-meta">{p.triple_count} triples</div>
-                      <button className="delete-btn" onClick={(e) => { e.stopPropagation(); deleteProject(p.name) }} title="Delete project"></button>
+            )}
+
+            <div className="panel-toggles">
+              <button 
+                className={`icon-btn ${sidePanel === 'schema' ? 'active' : ''}`}
+                onClick={() => setSidePanel(s => s === 'schema' ? null : 'schema')}
+                title="Schema Browser"
+              >
+                <BookIcon size={18} />
+              </button>
+              <button 
+                className={`icon-btn ${sidePanel === 'import' ? 'active' : ''}`}
+                onClick={() => setSidePanel(s => s === 'import' ? null : 'import')}
+                title="Import / Export"
+              >
+                I/O
+              </button>
+            </div>
+          </div>
+
+          <div className="results-content">
+            <div className="results-main">
+              {viewMode === 'table' && queryResults && (
+                <>
+                  {queryResults.type === 'select' && (
+                    <ResultsTable results={queryResults.results} columns={queryResults.columns} theme={theme} />
+                  )}
+                  {queryResults.type === 'ask' && (
+                    <div className="ask-result">
+                      <span className={queryResults.result ? 'true' : 'false'}>
+                        {queryResults.result ? 'TRUE' : 'FALSE'}
+                      </span>
                     </div>
-                  ))
+                  )}
+                  {queryResults.type === 'update' && (
+                    <div className="update-result">
+                      <ZapIcon size={32} />
+                      <h3>Update Executed Successfully</h3>
+                      <p>{queryResults.affected || 0} triples affected</p>
+                    </div>
+                  )}
+                  {queryResults.type === 'construct' && (
+                    <ResultsTable 
+                      results={queryResults.triples?.map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object }))} 
+                      columns={['subject', 'predicate', 'object']} 
+                      theme={theme}
+                    />
+                  )}
+                </>
+              )}
+
+              {viewMode === 'graph' && (
+                <div className="graph-wrapper">
+                  <GraphView 
+                    nodes={graphNodes} 
+                    edges={graphEdges} 
+                    onNodeClick={handleNodeClick}
+                    onEdgeClick={handleEdgeClick}
+                    theme={theme} 
+                  />
+                  {(selectedNode || selectedEdge) && (
+                    <div className={`graph-details-panel ${theme}`}>
+                      <div className="graph-details-header">
+                        <h4>{selectedNode ? 'Node Properties' : 'Edge Details'}</h4>
+                        <button className="close-btn" onClick={() => { setSelectedNode(null); setSelectedEdge(null); setNodeProperties(null); }}>×</button>
+                      </div>
+                      <div className="graph-details-content">
+                        {selectedNode && (
+                          <>
+                            <div className="detail-uri">{getLocalName(selectedNode.id)}</div>
+                            <div className="detail-full-uri">{selectedNode.id}</div>
+                            {nodeProperties && nodeProperties.length > 0 ? (
+                              <table className="properties-table">
+                                <thead>
+                                  <tr><th>Property</th><th>Value</th><th>Source</th></tr>
+                                </thead>
+                                <tbody>
+                                  {nodeProperties.map((prop, i) => (
+                                    <tr key={i}>
+                                      <td title={prop.p}>{getLocalName(prop.p)}</td>
+                                      <td title={prop.o}>{getLocalName(prop.o)}</td>
+                                      <td>{prop.source ? `${getLocalName(prop.source)} (${prop.confidence || 1})` : '-'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            ) : (
+                              <p className="no-properties">No properties found</p>
+                            )}
+                          </>
+                        )}
+                        {selectedEdge && (
+                          <>
+                            <div className="edge-detail">
+                              <span className="edge-label">Predicate:</span>
+                              <span className="edge-value" title={selectedEdge.predicate}>{getLocalName(selectedEdge.predicate)}</span>
+                            </div>
+                            <div className="edge-detail">
+                              <span className="edge-label">Full URI:</span>
+                              <span className="edge-value-small">{selectedEdge.predicate}</span>
+                            </div>
+                            <div className="edge-detail">
+                              <span className="edge-label">Source:</span>
+                              <span className="edge-value">{getLocalName(selectedEdge.source?.id || selectedEdge.source)}</span>
+                            </div>
+                            <div className="edge-detail">
+                              <span className="edge-label">Target:</span>
+                              <span className="edge-value">{getLocalName(selectedEdge.target?.id || selectedEdge.target)}</span>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {viewMode === 'json' && queryResults && (
+                <div className="json-view">
+                  <pre>{JSON.stringify(queryResults, null, 2)}</pre>
+                </div>
+              )}
+
+              {!queryResults && viewMode !== 'graph' && (
+                <div className="empty-results">Run a query to see results</div>
+              )}
+            </div>
+
+            {sidePanel && (
+              <div className="side-panel">
+                <button className="close-panel" onClick={() => setSidePanel(null)}>
+                  <CloseIcon size={16} />
+                </button>
+                {sidePanel === 'schema' && (
+                  <SchemaBrowser 
+                    repositoryName={currentRepo} 
+                    onInsert={handleSchemaInsert}
+                    theme={theme}
+                  />
+                )}
+                {sidePanel === 'import' && (
+                  <ImportExport 
+                    repositoryName={currentRepo}
+                    onDataChanged={() => { loadStats(currentRepo); loadRepositories() }}
+                    theme={theme}
+                  />
                 )}
               </div>
-            </div>
-          )}
-          
-          {sidebarTab === 'sources' && (
-            <div className="section">
-              <div className="section-title">Registered Sources</div>
-              <div className="source-list">
-                {sources.map((source) => (
-                  <div key={source.id} className="source-item">
-                    <div className="name">{source.name}</div>
-                    <div className="type">{source.source_type} | {source.status}</div>
-                  </div>
-                ))}
-                {sources.length === 0 && <div style={{ color: 'rgba(255,255,255,0.5)' }}>No sources registered</div>}
-              </div>
-            </div>
-          )}
-        </aside>
-        
-        <main className="query-area">
-          <div className="query-editor">
-            <div className="query-header">
-              <span className="query-label">SPARQL Query</span>
-              <div className="quick-queries">
-                {sampleQueries.map((sq, i) => (
-                  <button key={i} className="btn btn-tiny" onClick={() => { setSparqlQuery(sq.query); executeSparql(sq.query) }} title={sq.query}>{sq.label}</button>
-                ))}
-              </div>
-            </div>
-            <textarea
-              className="query-input"
-              value={sparqlQuery}
-              onChange={(e) => setSparqlQuery(e.target.value)}
-              placeholder="Enter SPARQL query..."
-              onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') executeSparql() }}
-            />
-            <div className="query-actions">
-              <button className="btn btn-primary" onClick={() => executeSparql()} disabled={executing || !currentProject}>
-                {executing ? ' Running...' : ' Run Query'}
-              </button>
-              <span className="query-hint">Ctrl+Enter to execute</span>
-              {error && <span className="query-error">{error}</span>}
-            </div>
+            )}
           </div>
-          
-          <QueryResultsPanel
-            queryResults={queryResults}
-            viewMode={viewMode}
-            setViewMode={setViewMode}
-            graphNodes={graphNodes}
-            graphEdges={graphEdges}
-            selectedNode={selectedNode}
-            onNodeClick={handleNodeClick}
-            nodeTriples={nodeTriples}
-            onCloseNodePanel={() => { setSelectedNode(null); setNodeTriples([]) }}
-          />
-        </main>
-      </div>
+        </div>
+      </main>
     </div>
   )
 }

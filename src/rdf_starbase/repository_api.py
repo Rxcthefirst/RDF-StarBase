@@ -11,8 +11,9 @@ Provides REST endpoints for managing multiple repositories:
 from pathlib import Path
 from typing import Optional, Union
 import os
+import time
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel, Field
 import polars as pl
 
@@ -85,6 +86,41 @@ def dataframe_to_records(df: pl.DataFrame) -> list[dict]:
                 record[k] = v
         records.append(record)
     return records
+
+
+def extract_columnar(parsed_result) -> tuple[list[str], list[str], list[str]]:
+    """
+    Extract columnar triple data from parser output for fast ingestion.
+    
+    Returns (subjects, predicates, objects) lists for columnar insert.
+    """
+    # Fast path: ParsedDocument with to_columnar method
+    if hasattr(parsed_result, 'to_columnar'):
+        return parsed_result.to_columnar()
+    
+    # Handle ParsedDocument without to_columnar (older format)
+    if hasattr(parsed_result, 'triples'):
+        triples = parsed_result.triples
+        return (
+            [t.subject for t in triples],
+            [t.predicate for t in triples],
+            [t.object for t in triples],
+        )
+    
+    # Handle list of Triple objects
+    if parsed_result and hasattr(parsed_result[0], 'subject'):
+        return (
+            [t.subject for t in parsed_result],
+            [t.predicate for t in parsed_result],
+            [t.object for t in parsed_result],
+        )
+    
+    # Handle list of dicts
+    return (
+        [t.get("subject", t.get("s")) for t in parsed_result],
+        [t.get("predicate", t.get("p")) for t in parsed_result],
+        [t.get("object", t.get("o")) for t in parsed_result],
+    )
 
 
 def create_repository_router(
@@ -310,6 +346,199 @@ def create_repository_router(
             "created_at": info.created_at.isoformat(),
             "stats": store.stats(),
         }
+    
+    # =========================================================================
+    # Import / Export
+    # =========================================================================
+    
+    @router.post("/{name}/import")
+    async def import_data(name: str, request: dict):
+        """Import RDF data in various formats (turtle, ntriples, rdfxml, jsonld)."""
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        data = request.get("data", "")
+        format_type = request.get("format", "turtle")
+        
+        if not data.strip():
+            raise HTTPException(status_code=400, detail="No data provided")
+        
+        try:
+            # Use format module based on format type
+            if format_type == "turtle":
+                from rdf_starbase.formats.turtle import parse_turtle
+                triples = parse_turtle(data)
+            elif format_type == "ntriples":
+                from rdf_starbase.formats.ntriples import parse_ntriples
+                triples = parse_ntriples(data)
+            elif format_type == "rdfxml":
+                from rdf_starbase.formats.rdfxml import parse_rdfxml
+                triples = parse_rdfxml(data)
+            elif format_type == "jsonld":
+                from rdf_starbase.formats.jsonld import parse_jsonld
+                triples = parse_jsonld(data)
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported format: {format_type}")
+            
+            # Extract columnar data for fast insert
+            subjects, predicates, objects = extract_columnar(triples)
+            
+            # Use columnar insert (fastest path)
+            count = store.add_triples_columnar(
+                subjects=subjects,
+                predicates=predicates,
+                objects=objects,
+                source="import",
+                confidence=1.0,
+            )
+            manager.save(name)
+            
+            return {
+                "success": True,
+                "format": format_type,
+                "triples_added": count,
+                "message": f"Imported {count} triples from {format_type} data"
+            }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
+    
+    @router.post("/{name}/upload")
+    async def upload_file(
+        name: str,
+        file: UploadFile = File(...),
+        format: str = Form(None, description="Format: turtle, ntriples, rdfxml, jsonld (auto-detect from extension if not provided)")
+    ):
+        """
+        Upload an RDF file directly for fast import.
+        
+        Supports: .ttl, .nt, .rdf, .xml, .jsonld, .json
+        """
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        # Auto-detect format from filename
+        if not format:
+            ext = file.filename.split('.')[-1].lower() if file.filename else ''
+            format_map = {
+                'ttl': 'turtle',
+                'turtle': 'turtle',
+                'nt': 'ntriples',
+                'ntriples': 'ntriples',
+                'rdf': 'rdfxml',
+                'xml': 'rdfxml',
+                'rdfxml': 'rdfxml',
+                'jsonld': 'jsonld',
+                'json': 'jsonld',
+            }
+            format = format_map.get(ext, 'turtle')
+        
+        try:
+            start_time = time.time()
+            
+            # Read file content
+            content = await file.read()
+            data = content.decode('utf-8')
+            
+            # Parse based on format
+            if format == "turtle":
+                from rdf_starbase.formats.turtle import parse_turtle
+                triples = parse_turtle(data)
+            elif format == "ntriples":
+                from rdf_starbase.formats.ntriples import parse_ntriples
+                triples = parse_ntriples(data)
+            elif format == "rdfxml":
+                from rdf_starbase.formats.rdfxml import parse_rdfxml
+                triples = parse_rdfxml(data)
+            elif format == "jsonld":
+                from rdf_starbase.formats.jsonld import parse_jsonld
+                triples = parse_jsonld(data)
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported format: {format}")
+            
+            parse_time = time.time() - start_time
+            
+            # Extract columnar data for fast insert
+            subjects, predicates, objects = extract_columnar(triples)
+            
+            insert_start = time.time()
+            count = store.add_triples_columnar(
+                subjects=subjects,
+                predicates=predicates,
+                objects=objects,
+                source=f"file:{file.filename}",
+                confidence=1.0,
+            )
+            insert_time = time.time() - insert_start
+            
+            manager.save(name)
+            total_time = time.time() - start_time
+            
+            # Calculate throughput
+            triples_per_sec = count / total_time if total_time > 0 else 0
+            
+            return {
+                "success": True,
+                "filename": file.filename,
+                "format": format,
+                "triples_added": count,
+                "timing": {
+                    "parse_seconds": round(parse_time, 3),
+                    "insert_seconds": round(insert_time, 3),
+                    "total_seconds": round(total_time, 3),
+                    "triples_per_second": round(triples_per_sec, 0),
+                },
+                "message": f"Imported {count} triples in {total_time:.2f}s ({triples_per_sec:.0f} triples/sec)"
+            }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
+    
+    @router.get("/{name}/export")
+    async def export_data(
+        name: str,
+        format: str = Query("turtle", description="Export format: turtle, ntriples, rdfxml, jsonld")
+    ):
+        """Export all repository data in various formats."""
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        try:
+            # Get all triples
+            df = store.get_triples()
+            triples = []
+            for row in df.iter_rows(named=True):
+                triples.append({
+                    "subject": row.get("subject"),
+                    "predicate": row.get("predicate"),
+                    "object": row.get("object"),
+                })
+            
+            # Serialize based on format
+            if format == "turtle":
+                from rdf_starbase.formats.turtle import serialize_turtle
+                content = serialize_turtle(triples)
+            elif format == "ntriples":
+                from rdf_starbase.formats.ntriples import serialize_ntriples
+                content = serialize_ntriples(triples)
+            elif format == "rdfxml":
+                from rdf_starbase.formats.rdfxml import serialize_rdfxml
+                content = serialize_rdfxml(triples)
+            elif format == "jsonld":
+                from rdf_starbase.formats.jsonld import serialize_jsonld
+                content = serialize_jsonld(triples)
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported format: {format}")
+            
+            from fastapi.responses import PlainTextResponse
+            return PlainTextResponse(content=content, media_type="text/plain")
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
     
     # =========================================================================
     # Persistence

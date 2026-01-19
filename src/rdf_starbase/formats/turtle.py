@@ -40,6 +40,15 @@ class ParsedDocument:
     prefixes: Dict[str, str] = field(default_factory=dict)
     base: Optional[str] = None
     triples: List[Triple] = field(default_factory=list)
+    
+    def to_columnar(self) -> Tuple[List[str], List[str], List[str]]:
+        """Extract columnar data for fast ingestion."""
+        triples = self.triples
+        return (
+            [t.subject for t in triples],
+            [t.predicate for t in triples],
+            [t.object for t in triples],
+        )
 
 
 class TurtleParser:

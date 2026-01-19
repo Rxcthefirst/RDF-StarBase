@@ -1,0 +1,38 @@
+# =============================================================================
+# RDF-StarBase Docker Compose
+# =============================================================================
+# Simple deployment with persistent data volume
+#
+# Usage:
+#   docker compose up -d        # Start in background
+#   docker compose logs -f      # View logs
+#   docker compose down         # Stop
+#   docker compose down -v      # Stop and remove volumes
+# =============================================================================
+
+services:
+  rdf-starbase:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rdf-starbase:latest
+    container_name: rdf-starbase
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist repository data
+      - rdf-starbase-data:/data/repositories
+    environment:
+      - RDFSTARBASE_REPOSITORY_PATH=/data/repositories
+      - RDFSTARBASE_SERVE_STATIC=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  rdf-starbase-data:
+    name: rdf-starbase-data
