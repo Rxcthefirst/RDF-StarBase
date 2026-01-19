@@ -408,3 +408,153 @@ class TestProvenanceFilters:
         ages = result["age"].to_list()
         assert "34" in ages
         assert "36" in ages
+
+
+class TestProvenanceAnnotations:
+    """Tests for RDF-Star provenance predicate recognition."""
+    
+    def test_prov_wasAttributedTo_sets_source(self):
+        """Test that prov:wasAttributedTo sets the source field."""
+        store = TripleStore()
+        
+        # Insert with RDF-Star provenance annotation
+        result = execute_sparql(store, """
+            PREFIX ex: <http://example.org/>
+            PREFIX prov: <http://www.w3.org/ns/prov#>
+            
+            INSERT DATA {
+                ex:alice ex:name "Alice" .
+                << ex:alice ex:name "Alice" >> prov:wasAttributedTo "Wikipedia" .
+            }
+        """)
+        
+        assert result["count"] == 1  # Only 1 actual triple, annotation is metadata
+        
+        # Query and check source
+        triples = store.get_triples(subject="http://example.org/alice")
+        assert len(triples) == 1
+        assert triples["source"][0] == "Wikipedia"
+    
+    def test_prov_value_sets_confidence(self):
+        """Test that prov:value sets the confidence field."""
+        store = TripleStore()
+        
+        result = execute_sparql(store, """
+            PREFIX ex: <http://example.org/>
+            PREFIX prov: <http://www.w3.org/ns/prov#>
+            
+            INSERT DATA {
+                ex:bob ex:age "30" .
+                << ex:bob ex:age "30" >> prov:value 0.85 .
+            }
+        """)
+        
+        assert result["count"] == 1
+        
+        triples = store.get_triples(subject="http://example.org/bob")
+        assert len(triples) == 1
+        assert triples["confidence"][0] == 0.85
+    
+    def test_combined_source_and_confidence(self):
+        """Test that both source and confidence can be set."""
+        store = TripleStore()
+        
+        result = execute_sparql(store, """
+            PREFIX ex: <http://example.org/>
+            PREFIX prov: <http://www.w3.org/ns/prov#>
+            
+            INSERT DATA {
+                ex:movie ex:title "Inception" .
+                << ex:movie ex:title "Inception" >> prov:wasAttributedTo "IMDb" .
+                << ex:movie ex:title "Inception" >> prov:value 0.99 .
+            }
+        """)
+        
+        assert result["count"] == 1
+        
+        triples = store.get_triples(subject="http://example.org/movie")
+        assert len(triples) == 1
+        assert triples["source"][0] == "IMDb"
+        assert triples["confidence"][0] == 0.99
+    
+    def test_annotation_only_creates_triple(self):
+        """Test that annotation-only patterns still create the base triple."""
+        store = TripleStore()
+        
+        # Only annotations, no explicit base triple
+        result = execute_sparql(store, """
+            PREFIX ex: <http://example.org/>
+            PREFIX prov: <http://www.w3.org/ns/prov#>
+            
+            INSERT DATA {
+                << ex:person ex:knows ex:friend >> prov:wasAttributedTo "SocialGraph" .
+                << ex:person ex:knows ex:friend >> prov:value 0.75 .
+            }
+        """)
+        
+        assert result["count"] == 1  # Base triple should be created
+        
+        triples = store.get_triples(
+            subject="http://example.org/person",
+            predicate="http://example.org/knows"
+        )
+        assert len(triples) == 1
+        assert triples["source"][0] == "SocialGraph"
+        assert triples["confidence"][0] == 0.75
+    
+    def test_dublin_core_source(self):
+        """Test that Dublin Core source predicate is recognized."""
+        store = TripleStore()
+        
+        result = execute_sparql(store, """
+            PREFIX ex: <http://example.org/>
+            PREFIX dcterms: <http://purl.org/dc/terms/>
+            
+            INSERT DATA {
+                ex:data ex:value "test" .
+                << ex:data ex:value "test" >> dcterms:source "OpenData" .
+            }
+        """)
+        
+        assert result["count"] == 1
+        
+        triples = store.get_triples(subject="http://example.org/data")
+        assert triples["source"][0] == "OpenData"
+    
+    def test_pav_createdBy(self):
+        """Test that PAV createdBy is recognized as source."""
+        store = TripleStore()
+        
+        result = execute_sparql(store, """
+            PREFIX ex: <http://example.org/>
+            PREFIX pav: <http://purl.org/pav/>
+            
+            INSERT DATA {
+                ex:doc ex:content "Hello" .
+                << ex:doc ex:content "Hello" >> pav:createdBy "AuthorSystem" .
+            }
+        """)
+        
+        assert result["count"] == 1
+        
+        triples = store.get_triples(subject="http://example.org/doc")
+        assert triples["source"][0] == "AuthorSystem"
+    
+    def test_dqv_quality_measurement(self):
+        """Test that DQV quality measurement sets confidence."""
+        store = TripleStore()
+        
+        result = execute_sparql(store, """
+            PREFIX ex: <http://example.org/>
+            PREFIX dqv: <http://www.w3.org/ns/dqv#>
+            
+            INSERT DATA {
+                ex:sensor ex:reading "42.5" .
+                << ex:sensor ex:reading "42.5" >> dqv:hasQualityMeasurement 0.92 .
+            }
+        """)
+        
+        assert result["count"] == 1
+        
+        triples = store.get_triples(subject="http://example.org/sensor")
+        assert triples["confidence"][0] == 0.92

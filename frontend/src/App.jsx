@@ -25,6 +25,206 @@ async function fetchJson(endpoint, options = {}) {
   return data
 }
 
+// Repository selector for the selected project
+async function fetchRepoJson(repoName, endpoint, options = {}) {
+  return fetchJson(`/repositories/${repoName}${endpoint}`, options)
+}
+
+// Helper to extract local name from URI (checks # first, then /)
+const getLocalName = (uri) => {
+  if (!uri) return uri
+  if (uri.includes('#')) return uri.split('#').pop()
+  return uri.split('/').pop()
+}
+
+// Create Project Modal Component
+function CreateProjectModal({ isOpen, onClose, onCreate }) {
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [error, setError] = useState(null)
+  const [creating, setCreating] = useState(false)
+
+  if (!isOpen) return null
+
+  const handleCreate = async () => {
+    if (!name.trim()) {
+      setError('Project name is required')
+      return
+    }
+    
+    try {
+      setCreating(true)
+      setError(null)
+      await onCreate(name.trim(), description.trim())
+      setName('')
+      setDescription('')
+      onClose()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h2>Create New Project</h2>
+        <div className="form-group">
+          <label>Project Name</label>
+          <input
+            type="text"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="my-project"
+            pattern="[a-zA-Z0-9\-_]+"
+            autoFocus
+          />
+          <small>Letters, numbers, hyphens, and underscores only</small>
+        </div>
+        <div className="form-group">
+          <label>Description (optional)</label>
+          <textarea
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="A brief description of your project..."
+            rows={3}
+          />
+        </div>
+        {error && <div className="error">{error}</div>}
+        <div className="modal-buttons">
+          <button className="btn btn-secondary" onClick={onClose} disabled={creating}>
+            Cancel
+          </button>
+          <button className="btn" onClick={handleCreate} disabled={creating}>
+            {creating ? 'Creating...' : 'Create Project'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Load Data Modal Component
+function LoadDataModal({ isOpen, onClose, onLoadExample, onLoadCustom, currentProject }) {
+  const [tab, setTab] = useState('examples')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [customQuery, setCustomQuery] = useState(`PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX ex: <http://example.org/>
+
+INSERT DATA {
+  ex:person1 foaf:name "Alice" .
+  ex:person1 foaf:knows ex:person2 .
+  ex:person2 foaf:name "Bob" .
+}`)
+
+  const exampleDatasets = [
+    { id: 'movies', name: 'Movies & Directors', description: 'Film database with ratings from multiple sources' },
+    { id: 'techcorp', name: 'TechCorp Enterprise', description: 'Customer data with conflicts from 8 systems' },
+    { id: 'knowledge', name: 'Knowledge Graph', description: 'Academic entities with citations' },
+    { id: 'rdfstar', name: 'RDF-Star Demo', description: 'Quoted triples and nested annotations' },
+  ]
+
+  if (!isOpen) return null
+
+  const handleLoadExample = async (datasetId) => {
+    try {
+      setLoading(true)
+      setError(null)
+      await onLoadExample(datasetId)
+      onClose()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleLoadCustom = async () => {
+    try {
+      setLoading(true)
+      setError(null)
+      await onLoadCustom(customQuery)
+      onClose()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
+        <h2>Load Data into {currentProject}</h2>
+        
+        <div className="tabs" style={{ marginBottom: '1rem' }}>
+          <button 
+            className={`tab ${tab === 'examples' ? 'active' : ''}`}
+            onClick={() => setTab('examples')}
+          >
+            Example Datasets
+          </button>
+          <button 
+            className={`tab ${tab === 'custom' ? 'active' : ''}`}
+            onClick={() => setTab('custom')}
+          >
+            Custom SPARQL
+          </button>
+        </div>
+
+        {tab === 'examples' && (
+          <div className="dataset-grid">
+            {exampleDatasets.map(ds => (
+              <div key={ds.id} className="dataset-card">
+                <div className="dataset-name">{ds.name}</div>
+                <div className="dataset-desc">{ds.description}</div>
+                <button 
+                  className="btn btn-small"
+                  onClick={() => handleLoadExample(ds.id)}
+                  disabled={loading}
+                >
+                  {loading ? 'Loading...' : 'Load'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'custom' && (
+          <div className="form-group">
+            <label>SPARQL INSERT DATA Statement</label>
+            <textarea
+              className="sparql-input"
+              value={customQuery}
+              onChange={e => setCustomQuery(e.target.value)}
+              rows={10}
+              style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}
+            />
+            <button 
+              className="btn"
+              onClick={handleLoadCustom}
+              disabled={loading}
+              style={{ marginTop: '0.5rem' }}
+            >
+              {loading ? 'Loading...' : 'Execute INSERT'}
+            </button>
+          </div>
+        )}
+
+        {error && <div className="error">{error}</div>}
+        
+        <div className="modal-buttons">
+          <button className="btn btn-secondary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // Graph Visualization Component
 function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
   const svgRef = useRef(null)
@@ -37,28 +237,26 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
     svg.selectAll('*').remove()
     
     if (!nodes.length) {
-      // Show empty state message
       svg.append('text')
         .attr('x', '50%')
         .attr('y', '50%')
         .attr('text-anchor', 'middle')
         .attr('fill', 'rgba(255,255,255,0.5)')
         .attr('font-size', '1.25rem')
-        .text('No data in knowledge graph')
+        .text('No graph data to display')
       svg.append('text')
         .attr('x', '50%')
         .attr('y', '55%')
         .attr('text-anchor', 'middle')
         .attr('fill', 'rgba(255,255,255,0.3)')
         .attr('font-size', '0.875rem')
-        .text('Add triples via the API or load demo data')
+        .text('Run a query with URI relationships')
       return
     }
     
     const width = svgRef.current.clientWidth
     const height = svgRef.current.clientHeight
     
-    // Create zoom behavior
     const zoom = d3.zoom()
       .scaleExtent([0.1, 4])
       .on('zoom', (event) => {
@@ -69,14 +267,12 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
     
     const g = svg.append('g')
     
-    // Create simulation
     const simulation = d3.forceSimulation(nodes)
       .force('link', d3.forceLink(edges).id(d => d.id).distance(150))
       .force('charge', d3.forceManyBody().strength(-300))
       .force('center', d3.forceCenter(width / 2, height / 2))
       .force('collision', d3.forceCollide().radius(40))
     
-    // Create arrow marker
     svg.append('defs').append('marker')
       .attr('id', 'arrow')
       .attr('viewBox', '0 -5 10 10')
@@ -89,7 +285,6 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
       .attr('fill', 'rgba(233, 69, 96, 0.5)')
       .attr('d', 'M0,-5L10,0L0,5')
     
-    // Create links
     const link = g.append('g')
       .selectAll('line')
       .data(edges)
@@ -105,15 +300,13 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
       })
       .on('mouseout', () => setTooltip(null))
     
-    // Create edge labels
     const edgeLabels = g.append('g')
       .selectAll('text')
       .data(edges)
       .join('text')
       .attr('class', 'edge-label')
-      .text(d => d.label || d.predicate.split('/').pop())
+      .text(d => d.label || getLocalName(d.predicate))
     
-    // Create nodes
     const node = g.append('g')
       .selectAll('g')
       .data(nodes)
@@ -121,7 +314,7 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
       .attr('class', d => `node ${selectedNode === d.id ? 'selected' : ''}`)
       .call(d3.drag()
         .on('start', (event, d) => {
-          if (!event.active) simulation.alphaTarget(0.3).restart()
+          if (!event.active) simulation.alphaTarget(0.01).restart()
           d.fx = d.x
           d.fy = d.y
         })
@@ -131,8 +324,6 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
         })
         .on('end', (event, d) => {
           if (!event.active) simulation.alphaTarget(0)
-          d.fx = null
-          d.fy = null
         }))
       .on('click', (event, d) => onNodeClick(d))
     
@@ -141,9 +332,8 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
     
     node.append('text')
       .attr('dy', 30)
-      .text(d => d.label || d.id.split('/').pop())
+      .text(d => d.label || getLocalName(d.id))
     
-    // Update positions on simulation tick
     simulation.on('tick', () => {
       link
         .attr('x1', d => d.source.x)
@@ -158,7 +348,6 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
       node.attr('transform', d => `translate(${d.x},${d.y})`)
     })
     
-    // Cleanup
     return () => simulation.stop()
   }, [nodes, edges, selectedNode, onNodeClick])
   
@@ -166,7 +355,10 @@ function GraphView({ nodes, edges, selectedNode, onNodeClick }) {
     <div className="graph-container">
       <svg ref={svgRef} className="graph-svg" />
       {tooltip && (
-        <div className="tooltip" style={{ left: tooltip.x, top: tooltip.y }}>
+        <div 
+          className="tooltip" 
+          style={{ left: tooltip.x, top: tooltip.y }}
+        >
           {tooltip.content}
         </div>
       )}
@@ -181,7 +373,7 @@ function NodeInfoPanel({ node, triples, onClose }) {
   return (
     <div className="info-panel">
       <button className="close-btn" onClick={onClose}>&times;</button>
-      <h3>{node.label || node.id.split('/').pop()}</h3>
+      <h3>{node.label || getLocalName(node.id)}</h3>
       <div className="triple-item" style={{ background: 'none', padding: 0 }}>
         <code style={{ fontSize: '0.7rem', wordBreak: 'break-all', color: 'rgba(255,255,255,0.5)' }}>
           {node.id}
@@ -191,8 +383,8 @@ function NodeInfoPanel({ node, triples, onClose }) {
       <div className="triple-list">
         {triples.map((t, i) => (
           <div key={i} className="triple-item">
-            <span className="predicate">{t.predicate.split('/').pop()}</span>
-            {' → '}
+            <span className="predicate">{getLocalName(t.predicate)}</span>
+            {'  '}
             <span className="object">{t.object}</span>
             <div className="meta">
               Source: {t.source} | Confidence: {(t.confidence * 100).toFixed(0)}%
@@ -200,9 +392,7 @@ function NodeInfoPanel({ node, triples, onClose }) {
           </div>
         ))}
         {triples.length === 0 && (
-          <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.875rem' }}>
-            No properties found
-          </div>
+          <div style={{ color: 'rgba(255,255,255,0.5)' }}>No properties found</div>
         )}
       </div>
     </div>
@@ -211,7 +401,9 @@ function NodeInfoPanel({ node, triples, onClose }) {
 
 // Results Table Component  
 function ResultsTable({ results, columns }) {
-  if (!results || results.length === 0) return null
+  if (!results || results.length === 0) {
+    return <div className="empty-results">No results</div>
+  }
   
   return (
     <div className="results-container">
@@ -237,51 +429,378 @@ function ResultsTable({ results, columns }) {
   )
 }
 
+// Raw JSON View Component
+function RawView({ data }) {
+  return (
+    <div className="raw-view">
+      <pre>{JSON.stringify(data, null, 2)}</pre>
+    </div>
+  )
+}
+
+// Query Results Panel - shows results in different views
+function QueryResultsPanel({ 
+  queryResults, 
+  viewMode, 
+  setViewMode, 
+  graphNodes, 
+  graphEdges,
+  selectedNode,
+  onNodeClick,
+  nodeTriples,
+  onCloseNodePanel
+}) {
+  const canShowGraph = graphNodes.length > 0 || graphEdges.length > 0
+  
+  return (
+    <div className="results-panel">
+      <div className="view-toggle">
+        <button 
+          className={`view-btn ${viewMode === 'graph' ? 'active' : ''}`}
+          onClick={() => setViewMode('graph')}
+          disabled={!canShowGraph}
+          title={canShowGraph ? 'Graph View' : 'No graph relationships in results'}
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16">
+            <circle cx="5" cy="12" r="3" fill="currentColor"/>
+            <circle cx="19" cy="6" r="3" fill="currentColor"/>
+            <circle cx="19" cy="18" r="3" fill="currentColor"/>
+            <line x1="8" y1="12" x2="16" y2="7" stroke="currentColor" strokeWidth="2"/>
+            <line x1="8" y1="12" x2="16" y2="17" stroke="currentColor" strokeWidth="2"/>
+          </svg>
+          Graph
+        </button>
+        <button 
+          className={`view-btn ${viewMode === 'table' ? 'active' : ''}`}
+          onClick={() => setViewMode('table')}
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16">
+            <rect x="3" y="3" width="18" height="4" fill="currentColor"/>
+            <rect x="3" y="9" width="18" height="3" fill="currentColor" opacity="0.7"/>
+            <rect x="3" y="14" width="18" height="3" fill="currentColor" opacity="0.5"/>
+            <rect x="3" y="19" width="18" height="2" fill="currentColor" opacity="0.3"/>
+          </svg>
+          Table
+        </button>
+        <button 
+          className={`view-btn ${viewMode === 'raw' ? 'active' : ''}`}
+          onClick={() => setViewMode('raw')}
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16">
+            <text x="4" y="16" fontSize="12" fill="currentColor">{ }</text>
+          </svg>
+          Raw
+        </button>
+        
+        {queryResults && (
+          <span className="result-info">
+            {queryResults.type === 'select' && `${queryResults.results?.length || 0} rows`}
+            {queryResults.type === 'ask' && (queryResults.result ? ' TRUE' : ' FALSE')}
+            {queryResults.type === 'update' && `${queryResults.affected || 0} affected`}
+            {queryResults.type === 'construct' && `${queryResults.triples?.length || 0} triples`}
+          </span>
+        )}
+      </div>
+      
+      <div className="results-content">
+        {viewMode === 'graph' && (
+          <>
+            <GraphView
+              nodes={graphNodes}
+              edges={graphEdges}
+              selectedNode={selectedNode}
+              onNodeClick={onNodeClick}
+            />
+            {selectedNode && (
+              <NodeInfoPanel
+                node={graphNodes.find(n => n.id === selectedNode)}
+                triples={nodeTriples}
+                onClose={onCloseNodePanel}
+              />
+            )}
+          </>
+        )}
+        
+        {viewMode === 'table' && queryResults && (
+          <>
+            {queryResults.type === 'select' && (
+              <ResultsTable 
+                results={queryResults.results} 
+                columns={queryResults.columns} 
+              />
+            )}
+            {queryResults.type === 'ask' && (
+              <div className="ask-result">
+                <div className={`ask-value ${queryResults.result ? 'true' : 'false'}`}>
+                  {queryResults.result ? 'TRUE' : 'FALSE'}
+                </div>
+              </div>
+            )}
+            {queryResults.type === 'update' && (
+              <div className="update-result">
+                <div className="update-message"> Update executed successfully</div>
+                <div className="update-details">{queryResults.affected || 0} triples affected</div>
+              </div>
+            )}
+            {queryResults.type === 'construct' && (
+              <ResultsTable 
+                results={queryResults.triples?.map(t => ({
+                  subject: t.subject,
+                  predicate: t.predicate,
+                  object: t.object
+                })) || []} 
+                columns={['subject', 'predicate', 'object']} 
+              />
+            )}
+          </>
+        )}
+        
+        {viewMode === 'raw' && queryResults && (
+          <RawView data={queryResults} />
+        )}
+        
+        {!queryResults && viewMode !== 'graph' && (
+          <div className="empty-results">Run a query to see results</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Main App Component
 function App() {
-  // State
+  const [projects, setProjects] = useState([])
+  const [currentProject, setCurrentProject] = useState(null)
+  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showLoadDataModal, setShowLoadDataModal] = useState(false)
+  
   const [stats, setStats] = useState(null)
-  const [nodes, setNodes] = useState([])
-  const [edges, setEdges] = useState([])
+  const [graphNodes, setGraphNodes] = useState([])
+  const [graphEdges, setGraphEdges] = useState([])
   const [selectedNode, setSelectedNode] = useState(null)
   const [nodeTriples, setNodeTriples] = useState([])
   const [sources, setSources] = useState([])
-  const [sparqlQuery, setSparqlQuery] = useState('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10')
+  const [sparqlQuery, setSparqlQuery] = useState('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
   const [queryResults, setQueryResults] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [executing, setExecuting] = useState(false)
   const [error, setError] = useState(null)
-  const [activeTab, setActiveTab] = useState('graph')
-  const [apiStatus, setApiStatus] = useState('checking') // 'checking', 'online', 'offline'
+  const [viewMode, setViewMode] = useState('graph')
+  const [sidebarTab, setSidebarTab] = useState('projects')
+  const [apiStatus, setApiStatus] = useState('checking')
   
-  // Load initial data
+  const loadProjects = useCallback(async () => {
+    try {
+      const data = await fetchJson('/repositories')
+      setProjects(data.repositories || [])
+      return data.repositories || []
+    } catch (err) {
+      console.error('[App] Failed to load projects:', err)
+      return []
+    }
+  }, [])
+  
+  const createProject = useCallback(async (name, description) => {
+    await fetchJson('/repositories', {
+      method: 'POST',
+      body: JSON.stringify({ name, description, tags: [] }),
+    })
+    await loadProjects()
+    setCurrentProject(name)
+  }, [loadProjects])
+  
+  const deleteProject = useCallback(async (name) => {
+    if (!confirm(`Delete project "${name}"? This cannot be undone.`)) return
+    
+    try {
+      await fetchJson(`/repositories/${name}?force=true`, { method: 'DELETE' })
+      await loadProjects()
+      if (currentProject === name) {
+        setCurrentProject(null)
+        setGraphNodes([])
+        setGraphEdges([])
+        setStats(null)
+        setQueryResults(null)
+      }
+    } catch (err) {
+      setError(err.message)
+    }
+  }, [currentProject, loadProjects])
+  
+  const loadProjectStats = useCallback(async (projectName) => {
+    if (!projectName) {
+      setStats(null)
+      return
+    }
+    
+    try {
+      const statsData = await fetchRepoJson(projectName, '/stats')
+      setStats(statsData.stats)
+    } catch (err) {
+      console.error('[App] Failed to load project stats:', err)
+    }
+  }, [])
+  
+  const buildGraphFromResults = useCallback((results, columns) => {
+    const nodeSet = new Set()
+    const edgeList = []
+    
+    const hasTriplePattern = columns.includes('s') && columns.includes('p') && columns.includes('o')
+    
+    if (hasTriplePattern) {
+      for (const row of results) {
+        const subject = row.s
+        const predicate = row.p
+        const obj = row.o
+        
+        if (!subject || !predicate || !obj) continue
+        
+        nodeSet.add(subject)
+        
+        if (typeof obj === 'string' && (obj.startsWith('http') || obj.startsWith('urn:'))) {
+          nodeSet.add(obj)
+          edgeList.push({
+            source: subject,
+            target: obj,
+            predicate: predicate,
+            label: getLocalName(predicate),
+          })
+        }
+      }
+    } else {
+      for (const row of results) {
+        for (const col of columns) {
+          const val = row[col]
+          if (typeof val === 'string' && (val.startsWith('http') || val.startsWith('urn:'))) {
+            nodeSet.add(val)
+          }
+        }
+      }
+    }
+    
+    const nodes = [...nodeSet].map(id => ({
+      id,
+      label: getLocalName(id)
+    }))
+    
+    return { nodes, edges: edgeList }
+  }, [])
+  
+  const executeSparql = useCallback(async (query = null) => {
+    const queryToRun = query || sparqlQuery
+    
+    if (!currentProject) {
+      setError('Please select or create a project first')
+      return
+    }
+    
+    try {
+      setError(null)
+      setExecuting(true)
+      
+      const result = await fetchRepoJson(currentProject, '/sparql', {
+        method: 'POST',
+        body: JSON.stringify({ query: queryToRun }),
+      })
+      
+      setQueryResults(result)
+      
+      if (result.type === 'select' && result.results) {
+        const { nodes, edges } = buildGraphFromResults(result.results, result.columns)
+        setGraphNodes(nodes)
+        setGraphEdges(edges)
+        
+        if (edges.length > 0) {
+          setViewMode('graph')
+        } else if (nodes.length === 0) {
+          setViewMode('table')
+        }
+      } else if (result.type === 'construct' && result.triples) {
+        const nodeSet = new Set()
+        const edgeList = []
+        
+        for (const triple of result.triples) {
+          nodeSet.add(triple.subject)
+          if (triple.object.startsWith('http') || triple.object.startsWith('urn:')) {
+            nodeSet.add(triple.object)
+            edgeList.push({
+              source: triple.subject,
+              target: triple.object,
+              predicate: triple.predicate,
+              label: getLocalName(triple.predicate),
+            })
+          }
+        }
+        
+        setGraphNodes([...nodeSet].map(id => ({ id, label: getLocalName(id) })))
+        setGraphEdges(edgeList)
+        setViewMode(edgeList.length > 0 ? 'graph' : 'table')
+      } else {
+        setGraphNodes([])
+        setGraphEdges([])
+        setViewMode('table')
+      }
+      
+      if (result.type === 'update') {
+        await loadProjectStats(currentProject)
+        await loadProjects()
+      }
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setExecuting(false)
+    }
+  }, [currentProject, sparqlQuery, buildGraphFromResults, loadProjectStats, loadProjects])
+  
+  const loadExampleDataset = useCallback(async (datasetId) => {
+    if (!currentProject) throw new Error('No project selected')
+    
+    await fetchRepoJson(currentProject, `/load-example/${datasetId}`, {
+      method: 'POST',
+    })
+    
+    await loadProjectStats(currentProject)
+    await loadProjects()
+    await executeSparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
+  }, [currentProject, loadProjectStats, loadProjects, executeSparql])
+  
+  const loadCustomData = useCallback(async (sparqlQuery) => {
+    if (!currentProject) throw new Error('No project selected')
+    
+    await fetchRepoJson(currentProject, '/sparql', {
+      method: 'POST',
+      body: JSON.stringify({ query: sparqlQuery }),
+    })
+    
+    await loadProjectStats(currentProject)
+    await loadProjects()
+    await executeSparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
+  }, [currentProject, loadProjectStats, loadProjects, executeSparql])
+  
   useEffect(() => {
-    async function loadData() {
+    async function init() {
       try {
         setLoading(true)
         setError(null)
         setApiStatus('checking')
         
-        console.log('[App] Loading data from API...')
-        
-        const [statsData, nodesData, edgesData, sourcesData] = await Promise.all([
-          fetchJson('/stats'),
-          fetchJson('/graph/nodes?limit=50'),
-          fetchJson('/graph/edges?limit=200'),
-          fetchJson('/sources'),
-        ])
-        
+        await fetchJson('/health')
         setApiStatus('online')
-        setStats(statsData)
-        setNodes(nodesData.nodes)
-        setEdges(edgesData.edges.map(e => ({
-          ...e,
-          source: e.source,
-          target: e.target,
-        })))
-        setSources(sourcesData.sources)
-        console.log('[App] Data loaded successfully', { nodes: nodesData.nodes.length, edges: edgesData.edges.length })
+        
+        const repos = await loadProjects()
+        
+        try {
+          const sourcesData = await fetchJson('/sources')
+          setSources(sourcesData.sources || [])
+        } catch (e) {
+          console.warn('[App] Could not load sources:', e)
+        }
+        
+        if (repos.length > 0) {
+          setCurrentProject(repos[0].name)
+        }
       } catch (err) {
-        console.error('[App] Failed to load data:', err)
+        console.error('[App] Failed to initialize:', err)
         setApiStatus('offline')
         setError(err.message)
       } finally {
@@ -289,64 +808,57 @@ function App() {
       }
     }
     
-    loadData()
-  }, [])
+    init()
+  }, [loadProjects])
   
-  // Handle node click - load node details
+  useEffect(() => {
+    if (currentProject && apiStatus === 'online') {
+      loadProjectStats(currentProject)
+      executeSparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
+    } else {
+      setGraphNodes([])
+      setGraphEdges([])
+      setQueryResults(null)
+    }
+  }, [currentProject, apiStatus, loadProjectStats])
+  
   const handleNodeClick = useCallback(async (node) => {
     setSelectedNode(node.id)
     
+    if (!currentProject) {
+      setNodeTriples([])
+      return
+    }
+    
     try {
-      const triples = await fetchJson(`/triples?subject=${encodeURIComponent(node.id)}`)
+      const triples = await fetchRepoJson(currentProject, `/triples?subject=${encodeURIComponent(node.id)}`)
       setNodeTriples(triples.triples)
     } catch (err) {
       console.error('Failed to load node triples:', err)
       setNodeTriples([])
     }
-  }, [])
+  }, [currentProject])
   
-  // Execute SPARQL query
-  const executeSparql = useCallback(async () => {
-    try {
-      setError(null)
-      const result = await fetchJson('/sparql', {
-        method: 'POST',
-        body: JSON.stringify({ query: sparqlQuery }),
-      })
-      setQueryResults(result)
-    } catch (err) {
-      setError(err.message)
-    }
-  }, [sparqlQuery])
-  
-  // Sample queries - updated for demo data
   const sampleQueries = [
-    { label: 'All Triples', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20' },
-    { label: 'Movie Names', query: 'SELECT ?movie ?name WHERE { ?movie <http://schema.org/name> ?name }' },
-    { label: 'Nolan Films', query: 'SELECT ?m ?title WHERE { ?m <http://schema.org/director> <http://example.org/person/nolan> . ?m <http://schema.org/name> ?title }' },
-    { label: 'Ask Inception', query: 'ASK WHERE { ?s <http://schema.org/name> "Inception" }' },
+    { label: '📊 Show All', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100' },
+    { label: '⭐ With Provenance', query: 'SELECT ?s ?p ?o ?source ?confidence WHERE { ?s ?p ?o } LIMIT 100' },
+    { label: '🔗 Links Only', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?o)) } LIMIT 100' },
+    { label: '❓ ASK', query: 'ASK WHERE { ?s ?p ?o }' },
   ]
   
-  // Show API offline screen
   if (apiStatus === 'offline') {
     return (
       <div className="app">
         <div className="api-offline">
-          <div className="offline-icon">⚠️</div>
+          <div className="offline-icon"></div>
           <h2>API Server Not Running</h2>
           <p>The RDF-StarBase API server is not responding.</p>
           <div className="offline-instructions">
-            <h3>To start the server with demo data:</h3>
+            <h3>To start the server:</h3>
             <code>cd e:\RDF-StarBase</code>
-            <code>python scripts/run_demo.py</code>
-            <p style={{marginTop: '1rem', fontSize: '0.875rem', color: 'rgba(255,255,255,0.6)'}}>
-              Or start the basic server: <code style={{display: 'inline'}}>uvicorn rdf_starbase.web:app</code>
-            </p>
+            <code>uvicorn rdf_starbase.repository_api:app --reload</code>
           </div>
-          <button className="btn" onClick={() => window.location.reload()}>
-            Retry Connection
-          </button>
-          {error && <div className="error" style={{marginTop: '1rem'}}>{error}</div>}
+          <button className="btn" onClick={() => window.location.reload()}>Retry Connection</button>
         </div>
       </div>
     )
@@ -362,161 +874,140 @@ function App() {
   
   return (
     <div className="app">
-      {/* Header */}
+      <CreateProjectModal
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        onCreate={createProject}
+      />
+      
+      <LoadDataModal
+        isOpen={showLoadDataModal}
+        onClose={() => setShowLoadDataModal(false)}
+        onLoadExample={loadExampleDataset}
+        onLoadCustom={loadCustomData}
+        currentProject={currentProject}
+      />
+      
       <header className="header">
         <h1>
           <svg className="logo" viewBox="0 0 24 24">
             <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
           </svg>
-          RDF-StarBase Explorer
+          RDF-StarBase
         </h1>
-        {stats && (
+        
+        <div className="project-selector">
+          <select
+            value={currentProject || ''}
+            onChange={(e) => setCurrentProject(e.target.value || null)}
+            className="project-dropdown"
+          >
+            <option value="">Select a project...</option>
+            {projects.map(p => (
+              <option key={p.name} value={p.name}>
+                {p.name} ({p.triple_count} triples)
+              </option>
+            ))}
+          </select>
+          <button className="btn btn-small" onClick={() => setShowCreateModal(true)} title="Create New Project">+ New</button>
+          <button className="btn btn-small btn-secondary" onClick={() => setShowLoadDataModal(true)} title="Load Data" disabled={!currentProject}> Load</button>
+        </div>
+        
+        {stats && currentProject && (
           <div className="stats-bar">
-            <span>
-              Assertions: <span className="value">{stats.store?.total_assertions || 0}</span>
-            </span>
-            <span>
-              Sources: <span className="value">{stats.registry?.total_sources || 0}</span>
-            </span>
-            <span>
-              Unique Subjects: <span className="value">{stats.store?.unique_subjects || 0}</span>
-            </span>
+            <span>Triples: <span className="value">{stats.total_assertions || 0}</span></span>
+            <span>Subjects: <span className="value">{stats.unique_subjects || 0}</span></span>
+            <span>Sources: <span className="value">{stats.unique_sources || 0}</span></span>
           </div>
         )}
       </header>
       
       <div className="main-content">
-        {/* Sidebar */}
         <aside className="sidebar">
           <div className="tabs">
-            <button 
-              className={`tab ${activeTab === 'graph' ? 'active' : ''}`}
-              onClick={() => setActiveTab('graph')}
-            >
-              Graph
-            </button>
-            <button 
-              className={`tab ${activeTab === 'sparql' ? 'active' : ''}`}
-              onClick={() => setActiveTab('sparql')}
-            >
-              SPARQL
-            </button>
-            <button 
-              className={`tab ${activeTab === 'sources' ? 'active' : ''}`}
-              onClick={() => setActiveTab('sources')}
-            >
-              Sources
-            </button>
+            <button className={`tab ${sidebarTab === 'projects' ? 'active' : ''}`} onClick={() => setSidebarTab('projects')}>Projects</button>
+            <button className={`tab ${sidebarTab === 'sources' ? 'active' : ''}`} onClick={() => setSidebarTab('sources')}>Sources</button>
           </div>
           
-          {activeTab === 'sparql' && (
+          {sidebarTab === 'projects' && (
             <div className="section">
-              <div className="section-title">SPARQL Query</div>
-              <textarea
-                className="sparql-input"
-                value={sparqlQuery}
-                onChange={(e) => setSparqlQuery(e.target.value)}
-                placeholder="Enter SPARQL query..."
-              />
-              <div className="btn-group">
-                <button className="btn" onClick={executeSparql}>
-                  Execute
-                </button>
+              <div className="section-title">
+                Your Projects
+                <button className="btn btn-small" style={{ marginLeft: 'auto' }} onClick={() => setShowCreateModal(true)}>+ New</button>
               </div>
-              
-              <div className="section-title" style={{ marginTop: '1rem' }}>Examples</div>
-              {sampleQueries.map((sq, i) => (
-                <button
-                  key={i}
-                  className="btn btn-secondary"
-                  style={{ width: '100%', marginBottom: '0.25rem', textAlign: 'left' }}
-                  onClick={() => setSparqlQuery(sq.query)}
-                >
-                  {sq.label}
-                </button>
-              ))}
-              
-              {error && <div className="error">{error}</div>}
-              
-              {queryResults && (
-                <div style={{ marginTop: '1rem' }}>
-                  <div className="section-title">
-                    Results ({queryResults.type})
-                    {queryResults.type === 'ask' && (
-                      <span className="value" style={{ marginLeft: '0.5rem' }}>
-                        {queryResults.result ? 'TRUE' : 'FALSE'}
-                      </span>
-                    )}
+              <div className="project-list">
+                {projects.length === 0 ? (
+                  <div className="empty-state">
+                    <p>No projects yet</p>
+                    <button className="btn" onClick={() => setShowCreateModal(true)}>Create Your First Project</button>
                   </div>
-                  {queryResults.type === 'select' && (
-                    <ResultsTable 
-                      results={queryResults.results} 
-                      columns={queryResults.columns} 
-                    />
-                  )}
-                </div>
-              )}
+                ) : (
+                  projects.map(p => (
+                    <div key={p.name} className={`project-item ${currentProject === p.name ? 'active' : ''}`} onClick={() => setCurrentProject(p.name)}>
+                      <div className="project-name">{p.name}</div>
+                      <div className="project-meta">{p.triple_count} triples</div>
+                      <button className="delete-btn" onClick={(e) => { e.stopPropagation(); deleteProject(p.name) }} title="Delete project"></button>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           )}
           
-          {activeTab === 'sources' && (
+          {sidebarTab === 'sources' && (
             <div className="section">
               <div className="section-title">Registered Sources</div>
               <div className="source-list">
                 {sources.map((source) => (
                   <div key={source.id} className="source-item">
                     <div className="name">{source.name}</div>
-                    <div className="type">
-                      {source.source_type} | Status: {source.status}
-                    </div>
-                    {source.uri && (
-                      <div className="type">{source.uri}</div>
-                    )}
+                    <div className="type">{source.source_type} | {source.status}</div>
                   </div>
                 ))}
-                {sources.length === 0 && (
-                  <div style={{ color: 'rgba(255,255,255,0.5)' }}>
-                    No sources registered
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-          
-          {activeTab === 'graph' && (
-            <div className="section">
-              <div className="section-title">Graph Info</div>
-              <p style={{ fontSize: '0.875rem', color: 'rgba(255,255,255,0.7)' }}>
-                Click on a node to view its properties.
-                Drag nodes to rearrange. Scroll to zoom.
-              </p>
-              <div style={{ marginTop: '1rem', fontSize: '0.875rem' }}>
-                <div>Nodes: <span className="value">{nodes.length}</span></div>
-                <div>Edges: <span className="value">{edges.length}</span></div>
+                {sources.length === 0 && <div style={{ color: 'rgba(255,255,255,0.5)' }}>No sources registered</div>}
               </div>
             </div>
           )}
         </aside>
         
-        {/* Main Graph Area */}
-        <GraphView
-          nodes={nodes}
-          edges={edges}
-          selectedNode={selectedNode}
-          onNodeClick={handleNodeClick}
-        />
-        
-        {/* Node Info Panel */}
-        {selectedNode && (
-          <NodeInfoPanel
-            node={nodes.find(n => n.id === selectedNode)}
-            triples={nodeTriples}
-            onClose={() => {
-              setSelectedNode(null)
-              setNodeTriples([])
-            }}
+        <main className="query-area">
+          <div className="query-editor">
+            <div className="query-header">
+              <span className="query-label">SPARQL Query</span>
+              <div className="quick-queries">
+                {sampleQueries.map((sq, i) => (
+                  <button key={i} className="btn btn-tiny" onClick={() => { setSparqlQuery(sq.query); executeSparql(sq.query) }} title={sq.query}>{sq.label}</button>
+                ))}
+              </div>
+            </div>
+            <textarea
+              className="query-input"
+              value={sparqlQuery}
+              onChange={(e) => setSparqlQuery(e.target.value)}
+              placeholder="Enter SPARQL query..."
+              onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') executeSparql() }}
+            />
+            <div className="query-actions">
+              <button className="btn btn-primary" onClick={() => executeSparql()} disabled={executing || !currentProject}>
+                {executing ? ' Running...' : ' Run Query'}
+              </button>
+              <span className="query-hint">Ctrl+Enter to execute</span>
+              {error && <span className="query-error">{error}</span>}
+            </div>
+          </div>
+          
+          <QueryResultsPanel
+            queryResults={queryResults}
+            viewMode={viewMode}
+            setViewMode={setViewMode}
+            graphNodes={graphNodes}
+            graphEdges={graphEdges}
+            selectedNode={selectedNode}
+            onNodeClick={handleNodeClick}
+            nodeTriples={nodeTriples}
+            onCloseNodePanel={() => { setSelectedNode(null); setNodeTriples([]) }}
           />
-        )}
+        </main>
       </div>
     </div>
   )

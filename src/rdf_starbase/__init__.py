@@ -17,6 +17,17 @@ from rdf_starbase.registry import (
     SourceType,
     SourceStatus,
 )
+from rdf_starbase.ai_grounding import (
+    create_ai_router,
+    AIQueryRequest,
+    AIQueryResponse,
+    ClaimVerificationRequest,
+    ClaimVerificationResponse,
+    GroundedFact,
+    Citation,
+    ConfidenceLevel,
+)
+from rdf_starbase.repositories import RepositoryManager, RepositoryInfo
 
 __all__ = [
     "TripleStore",
@@ -31,4 +42,16 @@ __all__ = [
     "SyncRun",
     "SourceType",
     "SourceStatus",
+    # AI Grounding
+    "create_ai_router",
+    "AIQueryRequest",
+    "AIQueryResponse",
+    "ClaimVerificationRequest",
+    "ClaimVerificationResponse",
+    "GroundedFact",
+    "Citation",
+    "ConfidenceLevel",
+    # Repository Management
+    "RepositoryManager",
+    "RepositoryInfo",
 ]

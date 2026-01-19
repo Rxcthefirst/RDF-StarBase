@@ -1,0 +1,407 @@
+"""
+Repository Manager for RDF-StarBase.
+
+Manages multiple named TripleStore instances (repositories/projects).
+Similar to how GraphDB or Neo4j manage multiple databases.
+
+Features:
+- Create/delete named repositories
+- Persist repositories to disk
+- Switch between repositories
+- List all repositories with metadata
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Dict, Any
+import json
+import shutil
+
+from rdf_starbase.store import TripleStore
+
+
+@dataclass
+class RepositoryInfo:
+    """Metadata about a repository."""
+    name: str
+    created_at: datetime
+    description: str = ""
+    tags: list[str] = field(default_factory=list)
+    
+    # Stats (populated on demand)
+    triple_count: int = 0
+    subject_count: int = 0
+    predicate_count: int = 0
+    
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "created_at": self.created_at.isoformat(),
+            "description": self.description,
+            "tags": self.tags,
+            "triple_count": self.triple_count,
+            "subject_count": self.subject_count,
+            "predicate_count": self.predicate_count,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "RepositoryInfo":
+        return cls(
+            name=data["name"],
+            created_at=datetime.fromisoformat(data["created_at"]),
+            description=data.get("description", ""),
+            tags=data.get("tags", []),
+            triple_count=data.get("triple_count", 0),
+            subject_count=data.get("subject_count", 0),
+            predicate_count=data.get("predicate_count", 0),
+        )
+
+
+class RepositoryManager:
+    """
+    Manages multiple named TripleStore repositories.
+    
+    Provides:
+    - CRUD operations for repositories
+    - Persistence to a workspace directory
+    - In-memory caching of active repositories
+    
+    Usage:
+        manager = RepositoryManager("./data/repositories")
+        
+        # Create a new repository
+        manager.create("my-project", description="Test project")
+        
+        # Get the store for a repository
+        store = manager.get_store("my-project")
+        store.add_triple(...)
+        
+        # List all repositories
+        repos = manager.list_repositories()
+        
+        # Persist changes
+        manager.save("my-project")
+    """
+    
+    def __init__(self, workspace_path: str | Path):
+        """
+        Initialize the repository manager.
+        
+        Args:
+            workspace_path: Directory to store all repositories
+        """
+        self.workspace_path = Path(workspace_path)
+        self.workspace_path.mkdir(parents=True, exist_ok=True)
+        
+        # In-memory cache of loaded repositories
+        self._stores: Dict[str, TripleStore] = {}
+        self._info: Dict[str, RepositoryInfo] = {}
+        
+        # Load existing repository metadata
+        self._load_metadata()
+    
+    def _load_metadata(self) -> None:
+        """Load metadata for all repositories in the workspace."""
+        for repo_dir in self.workspace_path.iterdir():
+            if repo_dir.is_dir():
+                meta_file = repo_dir / "repository.json"
+                if meta_file.exists():
+                    try:
+                        with open(meta_file) as f:
+                            data = json.load(f)
+                        self._info[repo_dir.name] = RepositoryInfo.from_dict(data)
+                    except Exception as e:
+                        print(f"Warning: Failed to load metadata for {repo_dir.name}: {e}")
+    
+    def _save_metadata(self, name: str) -> None:
+        """Save metadata for a repository."""
+        repo_dir = self.workspace_path / name
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        
+        info = self._info.get(name)
+        if info:
+            # Update stats if store is loaded
+            if name in self._stores:
+                stats = self._stores[name].stats()
+                info.triple_count = stats.get("total_assertions", 0)
+                info.subject_count = stats.get("unique_subjects", 0)
+                info.predicate_count = stats.get("unique_predicates", 0)
+            
+            with open(repo_dir / "repository.json", "w") as f:
+                json.dump(info.to_dict(), f, indent=2)
+    
+    def create(
+        self, 
+        name: str, 
+        description: str = "",
+        tags: Optional[list[str]] = None,
+    ) -> RepositoryInfo:
+        """
+        Create a new repository.
+        
+        Args:
+            name: Unique repository name (alphanumeric + hyphens)
+            description: Human-readable description
+            tags: Optional tags for categorization
+            
+        Returns:
+            RepositoryInfo for the new repository
+            
+        Raises:
+            ValueError: If name is invalid or already exists
+        """
+        # Validate name
+        if not name:
+            raise ValueError("Repository name cannot be empty")
+        if not all(c.isalnum() or c in '-_' for c in name):
+            raise ValueError("Repository name can only contain alphanumeric characters, hyphens, and underscores")
+        if name in self._info:
+            raise ValueError(f"Repository '{name}' already exists")
+        
+        # Create repository
+        info = RepositoryInfo(
+            name=name,
+            created_at=datetime.now(timezone.utc),
+            description=description,
+            tags=tags or [],
+        )
+        
+        self._info[name] = info
+        self._stores[name] = TripleStore()
+        
+        # Persist metadata
+        self._save_metadata(name)
+        
+        return info
+    
+    def delete(self, name: str, force: bool = False) -> bool:
+        """
+        Delete a repository.
+        
+        Args:
+            name: Repository name
+            force: If True, delete even if repository has data
+            
+        Returns:
+            True if deleted
+            
+        Raises:
+            ValueError: If repository doesn't exist
+            ValueError: If repository has data and force=False
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+        
+        # Check if repository has data
+        store = self.get_store(name)
+        stats = store.stats()
+        if stats.get("total_assertions", 0) > 0 and not force:
+            raise ValueError(
+                f"Repository '{name}' contains {stats['total_assertions']} assertions. "
+                "Use force=True to delete anyway."
+            )
+        
+        # Remove from memory
+        self._stores.pop(name, None)
+        self._info.pop(name, None)
+        
+        # Remove from disk
+        repo_dir = self.workspace_path / name
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir)
+        
+        return True
+    
+    def get_store(self, name: str) -> TripleStore:
+        """
+        Get the TripleStore for a repository.
+        
+        Loads from disk if not already in memory.
+        
+        Args:
+            name: Repository name
+            
+        Returns:
+            TripleStore instance
+            
+        Raises:
+            ValueError: If repository doesn't exist
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+        
+        if name not in self._stores:
+            # Load from disk
+            repo_dir = self.workspace_path / name
+            store_file = repo_dir / "store.parquet"
+            
+            if store_file.exists():
+                self._stores[name] = TripleStore.load(store_file)
+            else:
+                self._stores[name] = TripleStore()
+        
+        return self._stores[name]
+    
+    def get_info(self, name: str) -> RepositoryInfo:
+        """
+        Get metadata for a repository.
+        
+        Args:
+            name: Repository name
+            
+        Returns:
+            RepositoryInfo
+            
+        Raises:
+            ValueError: If repository doesn't exist
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+        
+        info = self._info[name]
+        
+        # Update stats if store is loaded
+        if name in self._stores:
+            stats = self._stores[name].stats()
+            info.triple_count = stats.get("total_assertions", 0)
+            info.subject_count = stats.get("unique_subjects", 0)
+            info.predicate_count = stats.get("unique_predicates", 0)
+        
+        return info
+    
+    def list_repositories(self) -> list[RepositoryInfo]:
+        """
+        List all repositories with their metadata.
+        
+        Returns:
+            List of RepositoryInfo objects
+        """
+        result = []
+        for name, info in sorted(self._info.items()):
+            # Update stats if store is loaded
+            if name in self._stores:
+                stats = self._stores[name].stats()
+                info.triple_count = stats.get("total_assertions", 0)
+                info.subject_count = stats.get("unique_subjects", 0)
+                info.predicate_count = stats.get("unique_predicates", 0)
+            result.append(info)
+        return result
+    
+    def save(self, name: str) -> None:
+        """
+        Persist a repository to disk.
+        
+        Args:
+            name: Repository name
+            
+        Raises:
+            ValueError: If repository doesn't exist or isn't loaded
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+        if name not in self._stores:
+            # Nothing to save - not loaded
+            return
+        
+        repo_dir = self.workspace_path / name
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save store
+        store_file = repo_dir / "store.parquet"
+        self._stores[name].save(store_file)
+        
+        # Update metadata
+        self._save_metadata(name)
+    
+    def save_all(self) -> None:
+        """Persist all loaded repositories to disk."""
+        for name in self._stores:
+            self.save(name)
+    
+    def exists(self, name: str) -> bool:
+        """Check if a repository exists."""
+        return name in self._info
+    
+    def unload(self, name: str) -> None:
+        """
+        Unload a repository from memory (after saving).
+        
+        Useful for freeing memory when many repositories exist.
+        
+        Args:
+            name: Repository name
+        """
+        if name in self._stores:
+            self.save(name)
+            del self._stores[name]
+    
+    def rename(self, old_name: str, new_name: str) -> RepositoryInfo:
+        """
+        Rename a repository.
+        
+        Args:
+            old_name: Current repository name
+            new_name: New repository name
+            
+        Returns:
+            Updated RepositoryInfo
+        """
+        if old_name not in self._info:
+            raise ValueError(f"Repository '{old_name}' does not exist")
+        if new_name in self._info:
+            raise ValueError(f"Repository '{new_name}' already exists")
+        if not all(c.isalnum() or c in '-_' for c in new_name):
+            raise ValueError("Repository name can only contain alphanumeric characters, hyphens, and underscores")
+        
+        # Save first
+        if old_name in self._stores:
+            self.save(old_name)
+        
+        # Move directory
+        old_dir = self.workspace_path / old_name
+        new_dir = self.workspace_path / new_name
+        if old_dir.exists():
+            old_dir.rename(new_dir)
+        
+        # Update in-memory state
+        info = self._info.pop(old_name)
+        info.name = new_name
+        self._info[new_name] = info
+        
+        if old_name in self._stores:
+            self._stores[new_name] = self._stores.pop(old_name)
+        
+        # Update metadata file
+        self._save_metadata(new_name)
+        
+        return info
+    
+    def update_info(
+        self, 
+        name: str, 
+        description: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> RepositoryInfo:
+        """
+        Update repository metadata.
+        
+        Args:
+            name: Repository name
+            description: New description (if provided)
+            tags: New tags (if provided)
+            
+        Returns:
+            Updated RepositoryInfo
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+        
+        info = self._info[name]
+        if description is not None:
+            info.description = description
+        if tags is not None:
+            info.tags = tags
+        
+        self._save_metadata(name)
+        return info

@@ -30,6 +30,8 @@ from rdf_starbase import (
     execute_sparql,
     parse_query,
 )
+from rdf_starbase.ai_grounding import create_ai_router
+from rdf_starbase.repository_api import create_repository_router
 
 
 # Pydantic models for API
@@ -54,6 +56,11 @@ class TripleInput(BaseModel):
     object: Union[str, int, float, bool]
     provenance: ProvenanceInput
     graph: Optional[str] = None
+
+
+class BatchTripleInput(BaseModel):
+    """Input for batch adding triples."""
+    triples: list[dict] = Field(..., description="List of triple dicts with subject, predicate, object, source, confidence, process")
 
 
 class SPARQLQuery(BaseModel):
@@ -120,6 +127,15 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
     app.state.store = store or TripleStore()
     app.state.registry = registry or AssertionRegistry()
     
+    # Add Repository Management router
+    repo_router, repo_manager = create_repository_router()
+    app.include_router(repo_router)
+    app.state.repo_manager = repo_manager
+    
+    # Add AI Grounding API router
+    ai_router = create_ai_router(app.state.store)
+    app.include_router(ai_router)
+    
     # ==========================================================================
     # Health & Info
     # ==========================================================================
@@ -163,6 +179,24 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
                 graph=triple.graph,
             )
             return {"assertion_id": str(assertion_id)}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    
+    @app.post("/triples/batch", tags=["Triples"])
+    async def add_triples_batch(batch: BatchTripleInput):
+        """
+        Add multiple triples in a single batch operation.
+        
+        This is MUCH faster than calling POST /triples repeatedly.
+        Each triple dict should have: subject, predicate, object, source, confidence (optional), process (optional).
+        """
+        try:
+            count = app.state.store.add_triples_batch(batch.triples)
+            return {
+                "success": True,
+                "count": count,
+                "message": f"Added {count} triples",
+            }
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
     
@@ -237,13 +271,21 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
     
     @app.post("/sparql", tags=["SPARQL"])
     async def execute_sparql_query(request: SPARQLQuery):
-        """Execute a SPARQL-Star query."""
+        """Execute a SPARQL-Star query (SELECT, ASK, INSERT DATA, DELETE DATA)."""
         try:
             result = execute_sparql(app.state.store, request.query)
             
             if isinstance(result, bool):
                 # ASK query
                 return {"type": "ask", "result": result}
+            elif isinstance(result, dict):
+                # UPDATE operation (INSERT DATA, DELETE DATA)
+                return {
+                    "type": "update",
+                    "operation": result.get("operation", "unknown"),
+                    "count": result.get("count", 0),
+                    "success": True,
+                }
             elif isinstance(result, pl.DataFrame):
                 # SELECT query
                 return {
@@ -254,6 +296,45 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
                 }
             else:
                 return {"type": "unknown", "result": str(result)}
+                
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Query error: {str(e)}")
+    
+    @app.post("/sparql/update", tags=["SPARQL"])
+    async def execute_sparql_update(request: SPARQLQuery):
+        """Execute a SPARQL UPDATE operation (INSERT DATA, DELETE DATA).
+        
+        Supports provenance headers:
+        - X-Provenance-Source: Source identifier (default: SPARQL_INSERT)
+        - X-Provenance-Confidence: Confidence score 0.0-1.0 (default: 1.0)
+        - X-Provenance-Process: Process identifier (optional)
+        """
+        try:
+            # For now, use default provenance
+            # TODO: Extract from headers
+            from rdf_starbase.models import ProvenanceContext
+            provenance = ProvenanceContext(source="SPARQL_UPDATE", confidence=1.0)
+            
+            result = execute_sparql(app.state.store, request.query, provenance)
+            
+            if isinstance(result, dict):
+                return {
+                    "type": "update",
+                    "operation": result.get("operation", "unknown"),
+                    "count": result.get("count", 0),
+                    "success": result.get("status") != "not_implemented",
+                    "message": f"Processed {result.get('count', 0)} triples",
+                }
+            else:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Expected an UPDATE operation (INSERT DATA, DELETE DATA)"
+                )
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Update error: {str(e)}")
                 
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Query error: {str(e)}")
