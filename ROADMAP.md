@@ -56,11 +56,26 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 
 ---
 
-### v0.2.0 — Beta (Q2 2026)
+### v0.2.0 — Beta (Q2 2026) ✅ SHIPPED
 
-**Goal:** Production hardening based on early adopter feedback
+**Goal:** Production hardening with modern web interface and Docker deployment
+
+#### Web Interface & Visualization
+- [x] **Monaco SPARQL Editor** — Syntax highlighting with @monaco-editor/react
+- [x] **Schema Browser** — Classes and properties viewer with click-to-insert
+- [x] **Import/Export UI** — File upload (Turtle, RDF/XML, N-Triples, JSON-LD)
+- [x] **Graph Visualization** — D3.js force-directed graph with node/edge interactions
+- [x] **Provenance Panel** — Node properties with RDF-Star metadata display
+- [x] **Catppuccin Theme** — Mocha dark and Latte light theme support
+
+#### Docker Deployment
+- [x] **Multi-stage Dockerfile** — Node 20 Alpine → Python 3.12 slim
+- [x] **docker-compose.yml** — Volume persistence for repository data
+- [x] **Production build** — Vite-optimized frontend with proper asset paths
+- [x] **Container orchestration** — Single-container deployment with embedded frontend
 
 #### Performance Enhancements
+- [x] **Columnar insertion** — `add_triples_columnar()` bypasses dict conversion
 - [x] **Lazy DataFrame materialization** — `_df` property uses Polars lazy evaluation
 - [x] **Short-circuit optimization** — Early exit when pattern terms don't exist in store
 - [x] **Fast term lookup** — O(1) `get_iri_id()` / `get_literal_id()` using cached dictionaries

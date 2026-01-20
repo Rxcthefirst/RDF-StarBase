@@ -15,7 +15,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rdf-starbase:latest
+    image: rxcthefirst/rdf-starbase:latest
     container_name: rdf-starbase
     ports:
       - "8000:8000"

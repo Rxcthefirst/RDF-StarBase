@@ -227,6 +227,13 @@ class TripleStore:
             left_on="g", right_on="term_id", how="left"
         )
         
+        # Replace 0 with null for optional provenance columns before joining
+        # This ensures unset values (0) don't get matched to xsd:string (which is term_id=0)
+        result = result.with_columns([
+            pl.when(pl.col("source") == 0).then(pl.lit(None).cast(pl.UInt64)).otherwise(pl.col("source")).alias("source"),
+            pl.when(pl.col("process") == 0).then(pl.lit(None).cast(pl.UInt64)).otherwise(pl.col("process")).alias("process"),
+        ])
+        
         # Source join
         result = result.join(
             term_lazy.select([pl.col("term_id"), pl.col("lex").alias("source_str")]),
@@ -1104,22 +1111,90 @@ class TripleStore:
                 return 0
             raise ValueError(f"Failed to parse {file_path}: {e}")
         
-        # Add triples to the graph
-        prov = ProvenanceContext(
-            source=source_uri,
-            confidence=1.0,
-            process="LOAD",
-        )
+        # Provenance predicate URIs to recognize
+        PROV_SOURCE_PREDICATES = {
+            "http://www.w3.org/ns/prov#wasDerivedFrom",
+            "http://www.w3.org/ns/prov#wasAttributedTo",
+            "http://www.w3.org/ns/prov#hadPrimarySource",
+        }
+        PROV_PROCESS_PREDICATES = {
+            "http://www.w3.org/ns/prov#wasGeneratedBy",
+        }
+        PROV_CONFIDENCE_PREDICATES = {
+            "http://www.w3.org/ns/prov#value",
+        }
+        PROV_TIMESTAMP_PREDICATES = {
+            "http://www.w3.org/ns/prov#generatedAtTime",
+        }
         
-        count = 0
+        # Separate base triples from RDF-Star annotation triples
+        base_triples = []
+        annotations = {}  # Key: (s, p, o) -> {source: ..., confidence: ..., timestamp: ...}
+        
         for triple in triples:
-            self.add_triple(
-                subject=triple.subject,
-                predicate=triple.predicate,
-                obj=triple.object,
-                provenance=prov,
+            if triple.subject_triple is not None:
+                # This is an RDF-Star annotation: << s p o >> predicate object
+                qt = triple.subject_triple
+                key = (qt.subject, qt.predicate, qt.object)
+                
+                if key not in annotations:
+                    annotations[key] = {}
+                
+                pred = triple.predicate
+                obj_val = triple.object
+                
+                # Extract the value (strip datatype for literals)
+                if isinstance(obj_val, str) and "^^" in obj_val:
+                    obj_val = obj_val.split("^^")[0].strip('"')
+                elif isinstance(obj_val, str):
+                    obj_val = obj_val.strip('"')
+                
+                if pred in PROV_SOURCE_PREDICATES:
+                    annotations[key]["source"] = triple.object  # Keep full URI
+                elif pred in PROV_PROCESS_PREDICATES:
+                    annotations[key]["process"] = triple.object  # Keep full URI
+                elif pred in PROV_CONFIDENCE_PREDICATES:
+                    try:
+                        annotations[key]["confidence"] = float(obj_val)
+                    except (ValueError, TypeError):
+                        annotations[key]["confidence"] = 1.0
+                elif pred in PROV_TIMESTAMP_PREDICATES:
+                    annotations[key]["timestamp"] = obj_val
+            else:
+                # Regular triple (not an annotation)
+                base_triples.append(triple)
+        
+        # Group triples by provenance for batch columnar inserts
+        prov_groups = {}  # (source, confidence) -> [(s, p, o), ...]
+        
+        for triple in base_triples:
+            key = (triple.subject, triple.predicate, triple.object)
+            if key in annotations:
+                ann = annotations[key]
+                source = ann.get("source", source_uri)
+                confidence = ann.get("confidence", 1.0)
+            else:
+                source = source_uri
+                confidence = 1.0
+            
+            prov_key = (source, confidence)
+            if prov_key not in prov_groups:
+                prov_groups[prov_key] = []
+            prov_groups[prov_key].append((triple.subject, triple.predicate, triple.object))
+        
+        # Batch columnar insert for each provenance group
+        count = 0
+        for (source, confidence), triples_list in prov_groups.items():
+            subjects = [t[0] for t in triples_list]
+            predicates = [t[1] for t in triples_list]
+            objects = [t[2] for t in triples_list]
+            count += self.add_triples_columnar(
+                subjects=subjects,
+                predicates=predicates,
+                objects=objects,
+                source=source,
+                confidence=confidence,
                 graph=graph_uri,
             )
-            count += 1
         
         return count

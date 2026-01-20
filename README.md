@@ -36,11 +36,59 @@ When your CRM says `customer.age = 34` and your Data Lake says `customer.age = 3
 
 ## Installation
 
+### PyPI (Recommended)
+
+```bash
+pip install rdf-starbase[web]  # Include REST API dependencies
+```
+
+Or for minimal installation:
+
 ```bash
 pip install rdf-starbase
 ```
 
-Or install from source:
+### Docker (Quickest Start)
+
+Run the complete stack (frontend + backend + database) in a single container:
+
+```bash
+docker run -d \
+  --name rdfstarbase \
+  -p 8000:8000 \
+  -v rdfstarbase-data:/data/repositories \
+  rxcthefirst/rdf-starbase:latest
+```
+
+Open http://localhost:8000/app/ to access the web interface.
+
+Or use docker-compose:
+
+```yaml
+services:
+  rdfstarbase:
+    image: rxcthefirst/rdf-starbase:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - rdfstarbase-data:/data/repositories
+    environment:
+      - PYTHONUNBUFFERED=1
+
+volumes:
+  rdfstarbase-data:
+```
+
+Start with `docker-compose up -d`.
+
+**Features included in Docker:**
+- Monaco SPARQL editor with syntax highlighting
+- Schema browser with class/property exploration
+- Import/export UI for 12 RDF formats (Turtle★, N-Triples★, TriG★, N-Quads, N3, TriX, JSON-LD, NDJSON-LD, RDF/JSON, RDF/XML, Binary RDF)
+- Interactive graph visualization with D3.js
+- REST API at http://localhost:8000/docs
+
+### From Source
 
 ```bash
 git clone https://github.com/ontus/rdf-starbase.git

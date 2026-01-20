@@ -164,11 +164,13 @@ class TermDict:
     
     def __init__(self):
         # Per-kind sequence counters
+        # NOTE: Start at 1 to reserve TermId 0 as the universal "null" value
+        # This ensures source=0 and process=0 don't accidentally match real terms
         self._next_payload: dict[TermKind, int] = {
-            TermKind.IRI: 0,
-            TermKind.LITERAL: 0,
-            TermKind.BNODE: 0,
-            TermKind.QUOTED_TRIPLE: 0,
+            TermKind.IRI: 1,
+            TermKind.LITERAL: 1,
+            TermKind.BNODE: 1,
+            TermKind.QUOTED_TRIPLE: 1,
         }
         
         # Forward map: hash -> TermId (for interning)

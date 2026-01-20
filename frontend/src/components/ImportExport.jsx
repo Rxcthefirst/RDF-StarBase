@@ -29,10 +29,28 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
     
     // Auto-detect format from extension
     const ext = file.name.split('.').pop()?.toLowerCase()
-    if (ext === 'ttl') setImportFormat('turtle')
-    else if (ext === 'nt') setImportFormat('ntriples')
-    else if (ext === 'rdf' || ext === 'xml') setImportFormat('rdfxml')
-    else if (ext === 'jsonld' || ext === 'json') setImportFormat('jsonld')
+    const formatMap = {
+      'ttl': 'turtle',
+      'turtle': 'turtle',
+      'nt': 'ntriples',
+      'ntriples': 'ntriples',
+      'nq': 'nquads',
+      'nquads': 'nquads',
+      'n3': 'n3',
+      'trig': 'trig',
+      'trix': 'trix',
+      'rdf': 'rdfxml',
+      'xml': 'rdfxml',
+      'rdfxml': 'rdfxml',
+      'jsonld': 'jsonld',
+      'json': 'jsonld',
+      'ndjsonld': 'ndjsonld',
+      'ndjson': 'ndjsonld',
+      'rdfjson': 'rdfjson',
+      'brf': 'binaryrdf',
+    }
+    const detectedFormat = formatMap[ext] || 'turtle'
+    setImportFormat(detectedFormat)
   }
 
   // Fast file upload using multipart form
@@ -190,10 +208,27 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
               onChange={e => setImportFormat(e.target.value)}
               className="ie-select"
             >
-              <option value="turtle">Turtle (.ttl)</option>
-              <option value="ntriples">N-Triples (.nt)</option>
-              <option value="rdfxml">RDF/XML (.rdf)</option>
-              <option value="jsonld">JSON-LD (.jsonld)</option>
+              <optgroup label="Turtle Family">
+                <option value="turtle">Turtle / Turtle★ (.ttl)</option>
+                <option value="n3">Notation3 (.n3)</option>
+                <option value="trig">TriG / TriG★ (.trig)</option>
+              </optgroup>
+              <optgroup label="N-Triples Family">
+                <option value="ntriples">N-Triples / N-Triples★ (.nt)</option>
+                <option value="nquads">N-Quads (.nq)</option>
+              </optgroup>
+              <optgroup label="JSON Formats">
+                <option value="jsonld">JSON-LD (.jsonld)</option>
+                <option value="ndjsonld">NDJSON-LD (.ndjsonld)</option>
+                <option value="rdfjson">RDF/JSON (.json)</option>
+              </optgroup>
+              <optgroup label="XML Formats">
+                <option value="rdfxml">RDF/XML (.rdf)</option>
+                <option value="trix">TriX (.trix)</option>
+              </optgroup>
+              <optgroup label="Binary">
+                <option value="binaryrdf">Binary RDF (.brf)</option>
+              </optgroup>
             </select>
           </div>
 
@@ -203,7 +238,7 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
               type="file"
               ref={fileInputRef}
               onChange={handleFileSelect}
-              accept=".ttl,.nt,.rdf,.xml,.jsonld,.json"
+              accept=".ttl,.nt,.nq,.n3,.trig,.trix,.rdf,.xml,.jsonld,.json,.ndjsonld,.ndjson,.rdfjson,.brf"
               style={{ display: 'none' }}
             />
             <button 

@@ -32,8 +32,48 @@ async function fetchJson(endpoint, options = {}) {
 
 const getLocalName = (uri) => {
   if (!uri) return uri
+  if (typeof uri !== 'string') return String(uri)
   if (uri.includes('#')) return uri.split('#').pop()
   return uri.split('/').pop()
+}
+
+// Check if a value is a URI (object property target)
+const isURI = (value) => {
+  if (!value || typeof value !== 'string') return false
+  return value.startsWith('http://') || value.startsWith('https://') || value.startsWith('urn:')
+}
+
+// Format a value for display - handles typed literals
+const formatValue = (value) => {
+  if (!value) return ''
+  if (typeof value !== 'string') return String(value)
+  
+  // If value is just an XSD datatype URI, it's likely a parsing error - show as "(empty)"
+  if (value.startsWith('http://www.w3.org/2001/XMLSchema#')) {
+    return `(${getLocalName(value)})`
+  }
+  
+  // Handle typed literals like "2023-03-14"^^xsd:date or "2023-03-14"^^<http://...>
+  if (value.includes('^^')) {
+    const parts = value.split('^^')
+    const val = parts[0]
+    // Remove surrounding quotes and angle brackets from value
+    return val.replace(/^["']|["']$/g, '')
+  }
+  
+  // Handle language-tagged literals like "Hello"@en
+  if (value.includes('@') && value.startsWith('"')) {
+    const match = value.match(/^"(.+)"@(\w+)$/)
+    if (match) return match[1]
+  }
+  
+  // Remove surrounding quotes if present
+  if ((value.startsWith('"') && value.endsWith('"')) || 
+      (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1)
+  }
+  
+  return value
 }
 
 // ============================================================================
@@ -329,6 +369,10 @@ function App() {
   const [selectedNode, setSelectedNode] = useState(null)
   const [selectedEdge, setSelectedEdge] = useState(null)
   const [nodeProperties, setNodeProperties] = useState(null)
+  const [nodeAnnotations, setNodeAnnotations] = useState(null) // RDF-Star annotations
+  const [detailsPanel, setDetailsPanel] = useState(false) // Right panel visibility
+  const [expandedSections, setExpandedSections] = useState({ objectProps: true, dataProps: true, provenance: false, annotations: false, metadata: false })
+  const [expandedProps, setExpandedProps] = useState({}) // Track expanded property accordions for competing claims
   
   // API state
   const [apiStatus, setApiStatus] = useState('checking')
@@ -404,8 +448,11 @@ function App() {
       for (const row of results) {
         const { s, p, o } = row
         if (!s || !p || !o) continue
+        // Skip RDF-Star annotation triples (quoted triple subjects/objects)
+        if (typeof s === 'string' && s.startsWith('<<')) continue
+        if (typeof o === 'string' && o.startsWith('<<')) continue
         nodeSet.add(s)
-        if (typeof o === 'string' && (o.startsWith('http') || o.startsWith('urn:'))) {
+        if (typeof o === 'string' && (o.startsWith('http') || o.startsWith('urn:') || o.startsWith('mailto:'))) {
           nodeSet.add(o)
           edgeList.push({ source: s, target: o, predicate: p, label: getLocalName(p) })
         }
@@ -510,31 +557,137 @@ function App() {
     }
   }, [currentRepo, apiStatus])
 
-  // Handle node click - fetch properties with provenance
+  // Handle node click - fetch properties with provenance and RDF-Star annotations
   const handleNodeClick = useCallback(async (node) => {
     setSelectedNode(node)
     setSelectedEdge(null)
+    setDetailsPanel(true)
+    setExpandedProps({})
     if (!currentRepo) return
     
     try {
-      // Query for all properties of this node with provenance
-      const query = `
-        SELECT ?p ?o ?source ?confidence WHERE {
+      // Query for all properties of this node with RDF-Star provenance
+      // Supports both internal provenance and W3C PROV vocabulary
+      const propertiesQuery = `
+        PREFIX prov: <http://www.w3.org/ns/prov#>
+        PREFIX rdfstar: <http://rdf-starbase.dev/>
+        
+        SELECT ?p ?o ?source ?confidence ?timestamp ?metaPred ?metaVal WHERE {
           <${node.id}> ?p ?o .
           OPTIONAL {
-            << <${node.id}> ?p ?o >> <http://rdf-starbase.dev/source> ?source .
-            << <${node.id}> ?p ?o >> <http://rdf-starbase.dev/confidence> ?confidence .
+            << <${node.id}> ?p ?o >> rdfstar:source ?internalSource .
           }
+          OPTIONAL {
+            << <${node.id}> ?p ?o >> rdfstar:confidence ?internalConf .
+          }
+          OPTIONAL {
+            << <${node.id}> ?p ?o >> prov:wasDerivedFrom ?provSource .
+          }
+          OPTIONAL {
+            << <${node.id}> ?p ?o >> prov:value ?provValue .
+          }
+          OPTIONAL {
+            << <${node.id}> ?p ?o >> prov:generatedAtTime ?provTime .
+          }
+          OPTIONAL {
+            << <${node.id}> ?p ?o >> ?metaPred ?metaVal .
+            FILTER(?metaPred != rdfstar:source && ?metaPred != rdfstar:confidence 
+                   && ?metaPred != prov:wasDerivedFrom && ?metaPred != prov:value 
+                   && ?metaPred != prov:generatedAtTime)
+          }
+          BIND(COALESCE(?internalSource, ?provSource) AS ?source)
+          BIND(COALESCE(?internalConf, ?provValue) AS ?confidence)
+          BIND(?provTime AS ?timestamp)
         }
       `
-      const response = await fetchJson(`/repositories/${currentRepo}/query`, {
+      const response = await fetchJson(`/repositories/${currentRepo}/sparql`, {
         method: 'POST',
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query: propertiesQuery }),
       })
-      setNodeProperties(response.results || [])
+      
+      // Group results by property, collecting all values and metadata
+      const results = response.results || []
+      const propMap = new Map()
+      results.forEach(row => {
+        const propKey = row.p
+        const valueKey = `${row.p}|${row.o}`
+        
+        if (!propMap.has(propKey)) {
+          propMap.set(propKey, {
+            predicate: row.p,
+            isObjectProperty: isURI(row.o),
+            values: new Map()
+          })
+        }
+        
+        const prop = propMap.get(propKey)
+        if (!prop.values.has(valueKey)) {
+          prop.values.set(valueKey, {
+            value: row.o,
+            sources: [],
+            hasProvenance: false
+          })
+        }
+        
+        const valEntry = prop.values.get(valueKey)
+        if (row.source || row.confidence || row.timestamp || row.metaPred) {
+          valEntry.hasProvenance = true
+          const sourceEntry = {
+            source: row.source,
+            confidence: row.confidence,
+            timestamp: row.timestamp,
+            metadata: []
+          }
+          if (row.metaPred && row.metaVal) {
+            sourceEntry.metadata.push({ predicate: row.metaPred, value: row.metaVal })
+          }
+          // Check if we already have this source
+          const existingSource = valEntry.sources.find(s => 
+            s.source === row.source && s.confidence === row.confidence && s.timestamp === row.timestamp
+          )
+          if (existingSource && row.metaPred) {
+            existingSource.metadata.push({ predicate: row.metaPred, value: row.metaVal })
+          } else if (!existingSource && (row.source || row.confidence || row.timestamp)) {
+            valEntry.sources.push(sourceEntry)
+          }
+        }
+      })
+      
+      // Convert to array format with competing claims detection
+      const processedProps = Array.from(propMap.values()).map(prop => ({
+        predicate: prop.predicate,
+        isObjectProperty: prop.isObjectProperty,
+        values: Array.from(prop.values.values()),
+        hasCompetingClaims: prop.values.size > 1,
+        hasProvenance: Array.from(prop.values.values()).some(v => v.hasProvenance)
+      }))
+      
+      setNodeProperties(processedProps)
+      
+      // Query for RDF-Star annotations (statements about statements)
+      const annotationsQuery = `
+        PREFIX prov: <http://www.w3.org/ns/prov#>
+        PREFIX rdfstar: <http://rdf-starbase.dev/>
+        
+        SELECT ?innerS ?innerP ?innerO ?annPred ?annVal WHERE {
+          << ?innerS ?innerP ?innerO >> ?annPred ?annVal .
+          FILTER(?innerS = <${node.id}> || ?innerO = <${node.id}>)
+        }
+        LIMIT 100
+      `
+      try {
+        const annResponse = await fetchJson(`/repositories/${currentRepo}/sparql`, {
+          method: 'POST',
+          body: JSON.stringify({ query: annotationsQuery }),
+        })
+        setNodeAnnotations(annResponse.results || [])
+      } catch {
+        setNodeAnnotations([])
+      }
     } catch (err) {
       console.error('Failed to load node properties:', err)
       setNodeProperties([])
+      setNodeAnnotations([])
     }
   }, [currentRepo])
 
@@ -542,9 +695,123 @@ function App() {
   const handleEdgeClick = useCallback(async (edge) => {
     setSelectedEdge(edge)
     setSelectedNode(null)
+    setDetailsPanel(true)
     // Edge already contains source, target, predicate
     // Could query for provenance here if needed
   }, [])
+
+  // Toggle accordion section
+  const toggleSection = (section) => {
+    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }))
+  }
+
+  // Toggle property expansion (for competing claims)
+  const togglePropExpand = (propKey) => {
+    setExpandedProps(prev => ({ ...prev, [propKey]: !prev[propKey] }))
+  }
+
+  // Expand graph with a new node - fetch its connections and add to graph
+  const expandNode = useCallback(async (nodeUri) => {
+    if (!currentRepo) return
+    
+    // Check if node already exists in graph
+    if (graphNodes.some(n => n.id === nodeUri)) {
+      // Node exists, just highlight it briefly
+      return
+    }
+    
+    try {
+      // Query for outgoing relationships from this node
+      const query = `
+        SELECT ?s ?p ?o WHERE {
+          { <${nodeUri}> ?p ?o . BIND(<${nodeUri}> AS ?s) }
+          UNION
+          { ?s ?p <${nodeUri}> . BIND(<${nodeUri}> AS ?o) }
+          FILTER(isIRI(?s) && isIRI(?o))
+        }
+        LIMIT 50
+      `
+      const response = await fetchJson(`/repositories/${currentRepo}/sparql`, {
+        method: 'POST',
+        body: JSON.stringify({ query }),
+      })
+      
+      const results = response.results || []
+      if (results.length === 0) return
+      
+      // Build fresh node set from existing nodes (use IDs only to avoid D3 mutation)
+      const nodeIds = new Set(graphNodes.map(n => n.id))
+      
+      // Build fresh edges list - extract IDs from potentially mutated D3 objects
+      const existingEdges = graphEdges.map(e => ({
+        source: typeof e.source === 'object' ? e.source.id : e.source,
+        target: typeof e.target === 'object' ? e.target.id : e.target,
+        predicate: e.predicate,
+        label: e.label
+      }))
+      
+      const newEdges = [...existingEdges]
+      
+      for (const row of results) {
+        // Add new nodes
+        if (!nodeIds.has(row.s)) {
+          nodeIds.add(row.s)
+        }
+        if (!nodeIds.has(row.o)) {
+          nodeIds.add(row.o)
+        }
+        // Check if edge already exists (compare string IDs)
+        const edgeExists = newEdges.some(e => 
+          e.source === row.s && e.target === row.o && e.predicate === row.p
+        )
+        if (!edgeExists) {
+          newEdges.push({ 
+            source: row.s, 
+            target: row.o, 
+            predicate: row.p, 
+            label: getLocalName(row.p) 
+          })
+        }
+      }
+      
+      // Create fresh node objects (D3 will add x, y, etc.)
+      const freshNodes = [...nodeIds].map(id => ({ id, label: getLocalName(id) }))
+      
+      // Update graph state with fresh arrays
+      setGraphNodes(freshNodes)
+      setGraphEdges(newEdges)
+      
+      // Update query results to include new triples
+      if (queryResults && queryResults.results) {
+        const existingKeys = new Set(queryResults.results.map(r => `${r.s}|${r.p}|${r.o}`))
+        const newResults = [...queryResults.results]
+        for (const row of results) {
+          const key = `${row.s}|${row.p}|${row.o}`
+          if (!existingKeys.has(key)) {
+            newResults.push(row)
+            existingKeys.add(key)
+          }
+        }
+        setQueryResults({ ...queryResults, results: newResults })
+      }
+    } catch (err) {
+      console.error('Failed to expand node:', err)
+    }
+  }, [currentRepo, graphNodes, graphEdges, queryResults])
+
+  // Check if a URI is already in the graph
+  const isNodeInGraph = useCallback((uri) => {
+    return graphNodes.some(n => n.id === uri)
+  }, [graphNodes])
+
+  // Close details panel
+  const closeDetailsPanel = () => {
+    setDetailsPanel(false)
+    setSelectedNode(null)
+    setSelectedEdge(null)
+    setNodeProperties(null)
+    setNodeAnnotations(null)
+  }
 
   // Handle schema insert
   const handleSchemaInsert = (snippet) => {
@@ -796,53 +1063,223 @@ function App() {
                     onEdgeClick={handleEdgeClick}
                     theme={theme} 
                   />
-                  {(selectedNode || selectedEdge) && (
+                  {detailsPanel && (selectedNode || selectedEdge) && (
                     <div className={`graph-details-panel ${theme}`}>
                       <div className="graph-details-header">
-                        <h4>{selectedNode ? 'Node Properties' : 'Edge Details'}</h4>
-                        <button className="close-btn" onClick={() => { setSelectedNode(null); setSelectedEdge(null); setNodeProperties(null); }}>×</button>
+                        <h4>{selectedNode ? 'Node Details' : 'Edge Details'}</h4>
+                        <button className="close-btn" onClick={closeDetailsPanel}>×</button>
                       </div>
                       <div className="graph-details-content">
                         {selectedNode && (
                           <>
                             <div className="detail-uri">{getLocalName(selectedNode.id)}</div>
                             <div className="detail-full-uri">{selectedNode.id}</div>
-                            {nodeProperties && nodeProperties.length > 0 ? (
-                              <table className="properties-table">
-                                <thead>
-                                  <tr><th>Property</th><th>Value</th><th>Source</th></tr>
-                                </thead>
-                                <tbody>
-                                  {nodeProperties.map((prop, i) => (
-                                    <tr key={i}>
-                                      <td title={prop.p}>{getLocalName(prop.p)}</td>
-                                      <td title={prop.o}>{getLocalName(prop.o)}</td>
-                                      <td>{prop.source ? `${getLocalName(prop.source)} (${prop.confidence || 1})` : '-'}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            ) : (
-                              <p className="no-properties">No properties found</p>
+                            
+                            {/* Object Properties Accordion */}
+                            {(() => {
+                              const objectProps = nodeProperties?.filter(p => p.isObjectProperty) || []
+                              return objectProps.length > 0 && (
+                                <div className="accordion-section">
+                                  <button 
+                                    className={`accordion-header ${expandedSections.objectProps ? 'expanded' : ''}`}
+                                    onClick={() => toggleSection('objectProps')}
+                                  >
+                                    <span>Object Properties</span>
+                                    <span className="accordion-count">{objectProps.length}</span>
+                                    <span className="accordion-icon">{expandedSections.objectProps ? '−' : '+'}</span>
+                                  </button>
+                                  {expandedSections.objectProps && (
+                                    <div className="accordion-content">
+                                      <div className="properties-list">
+                                        {objectProps.map((prop, i) => (
+                                          <div key={i} className={`property-item ${prop.hasCompetingClaims || prop.hasProvenance ? 'has-details' : ''}`}>
+                                            <div 
+                                              className="property-header"
+                                              onClick={() => (prop.hasCompetingClaims || prop.hasProvenance) && togglePropExpand(prop.predicate)}
+                                            >
+                                              <span className="prop-name" title={prop.predicate}>{getLocalName(prop.predicate)}</span>
+                                              <span className="prop-indicators">
+                                                {prop.hasProvenance && <span className="indicator prov-indicator" title="Has provenance">P</span>}
+                                                {prop.hasCompetingClaims && <span className="indicator claims-indicator" title="Competing claims">C</span>}
+                                              </span>
+                                              {(prop.hasCompetingClaims || prop.hasProvenance) && (
+                                                <span className="prop-expand">{expandedProps[prop.predicate] ? '−' : '+'}</span>
+                                              )}
+                                            </div>
+                                            <div className="property-values">
+                                              {prop.values.map((val, j) => (
+                                                <div key={j} className="prop-value-row">
+                                                  <span className="prop-value" title={val.value}>
+                                                    {getLocalName(val.value)}
+                                                  </span>
+                                                  {isURI(val.value) && !isNodeInGraph(val.value) && (
+                                                    <button 
+                                                      className="expand-btn"
+                                                      onClick={(e) => { e.stopPropagation(); expandNode(val.value); }}
+                                                      title="Add to graph"
+                                                    >+</button>
+                                                  )}
+                                                  {isURI(val.value) && isNodeInGraph(val.value) && (
+                                                    <span className="in-graph-indicator" title="In graph">●</span>
+                                                  )}
+                                                </div>
+                                              ))}
+                                            </div>
+                                            {expandedProps[prop.predicate] && (
+                                              <div className="property-details">
+                                                {prop.values.map((val, j) => (
+                                                  val.sources.length > 0 && (
+                                                    <div key={j} className="value-provenance">
+                                                      <div className="val-header">{formatValue(val.value)}</div>
+                                                      {val.sources.map((src, k) => (
+                                                        <div key={k} className="source-info">
+                                                          {src.source && <div className="src-row"><span className="src-label">Source:</span> <span className="src-val">{getLocalName(src.source)}</span></div>}
+                                                          {src.confidence && <div className="src-row"><span className="src-label">Confidence:</span> <span className="src-val">{formatValue(src.confidence)}</span></div>}
+                                                          {src.timestamp && <div className="src-row"><span className="src-label">Time:</span> <span className="src-val">{new Date(src.timestamp).toLocaleString()}</span></div>}
+                                                          {src.metadata?.map((m, l) => (
+                                                            <div key={l} className="src-row"><span className="src-label">{getLocalName(m.predicate)}:</span> <span className="src-val">{formatValue(m.value)}</span></div>
+                                                          ))}
+                                                        </div>
+                                                      ))}
+                                                    </div>
+                                                  )
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })()}
+
+                            {/* Data Properties Accordion */}
+                            {(() => {
+                              const dataProps = nodeProperties?.filter(p => !p.isObjectProperty) || []
+                              return dataProps.length > 0 && (
+                                <div className="accordion-section">
+                                  <button 
+                                    className={`accordion-header ${expandedSections.dataProps ? 'expanded' : ''}`}
+                                    onClick={() => toggleSection('dataProps')}
+                                  >
+                                    <span>Data Properties</span>
+                                    <span className="accordion-count">{dataProps.length}</span>
+                                    <span className="accordion-icon">{expandedSections.dataProps ? '−' : '+'}</span>
+                                  </button>
+                                  {expandedSections.dataProps && (
+                                    <div className="accordion-content">
+                                      <div className="properties-list">
+                                        {dataProps.map((prop, i) => (
+                                          <div key={i} className={`property-item ${prop.hasCompetingClaims || prop.hasProvenance ? 'has-details' : ''}`}>
+                                            <div 
+                                              className="property-header"
+                                              onClick={() => (prop.hasCompetingClaims || prop.hasProvenance) && togglePropExpand(prop.predicate)}
+                                            >
+                                              <span className="prop-name" title={prop.predicate}>{getLocalName(prop.predicate)}</span>
+                                              <span className="prop-indicators">
+                                                {prop.hasProvenance && <span className="indicator prov-indicator" title="Has provenance">P</span>}
+                                                {prop.hasCompetingClaims && <span className="indicator claims-indicator" title="Competing claims">C</span>}
+                                              </span>
+                                              {(prop.hasCompetingClaims || prop.hasProvenance) && (
+                                                <span className="prop-expand">{expandedProps[prop.predicate] ? '−' : '+'}</span>
+                                              )}
+                                            </div>
+                                            <div className="property-values">
+                                              {prop.values.map((val, j) => (
+                                                <div key={j} className="prop-value-row">
+                                                  <span className="prop-value literal-value" title={val.value}>
+                                                    {formatValue(val.value)}
+                                                  </span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                            {expandedProps[prop.predicate] && (
+                                              <div className="property-details">
+                                                {prop.values.map((val, j) => (
+                                                  val.sources.length > 0 && (
+                                                    <div key={j} className="value-provenance">
+                                                      <div className="val-header">"{formatValue(val.value)}"</div>
+                                                      {val.sources.map((src, k) => (
+                                                        <div key={k} className="source-info">
+                                                          {src.source && <div className="src-row"><span className="src-label">Source:</span> <span className="src-val">{getLocalName(src.source)}</span></div>}
+                                                          {src.confidence && <div className="src-row"><span className="src-label">Confidence:</span> <span className="src-val">{formatValue(src.confidence)}</span></div>}
+                                                          {src.timestamp && <div className="src-row"><span className="src-label">Time:</span> <span className="src-val">{new Date(src.timestamp).toLocaleString()}</span></div>}
+                                                          {src.metadata?.map((m, l) => (
+                                                            <div key={l} className="src-row"><span className="src-label">{getLocalName(m.predicate)}:</span> <span className="src-val">{formatValue(m.value)}</span></div>
+                                                          ))}
+                                                        </div>
+                                                      ))}
+                                                    </div>
+                                                  )
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })()}
+
+                            {/* RDF-Star Annotations Accordion */}
+                            <div className="accordion-section">
+                              <button 
+                                className={`accordion-header ${expandedSections.annotations ? 'expanded' : ''}`}
+                                onClick={() => toggleSection('annotations')}
+                              >
+                                <span>RDF-Star Annotations</span>
+                                <span className="accordion-count">{nodeAnnotations?.length || 0}</span>
+                                <span className="accordion-icon">{expandedSections.annotations ? '−' : '+'}</span>
+                              </button>
+                              {expandedSections.annotations && (
+                                <div className="accordion-content">
+                                  {nodeAnnotations && nodeAnnotations.length > 0 ? (
+                                    <div className="annotations-list">
+                                      {nodeAnnotations.map((ann, i) => (
+                                        <div key={i} className="annotation-item">
+                                          <div className="annotation-triple">
+                                            &lt;&lt; {getLocalName(ann.innerS)} {getLocalName(ann.innerP)} {getLocalName(ann.innerO)} &gt;&gt;
+                                          </div>
+                                          <div className="annotation-meta">
+                                            <span className="ann-pred">{getLocalName(ann.annPred)}</span>
+                                            <span className="ann-val">{formatValue(ann.annVal)}</span>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="no-data">No RDF-Star annotations</p>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* No properties message */}
+                            {(!nodeProperties || nodeProperties.length === 0) && (
+                              <p className="no-data">No properties found</p>
                             )}
                           </>
                         )}
                         {selectedEdge && (
                           <>
                             <div className="edge-detail">
-                              <span className="edge-label">Predicate:</span>
+                              <span className="edge-label">Predicate</span>
                               <span className="edge-value" title={selectedEdge.predicate}>{getLocalName(selectedEdge.predicate)}</span>
                             </div>
                             <div className="edge-detail">
-                              <span className="edge-label">Full URI:</span>
+                              <span className="edge-label">Full URI</span>
                               <span className="edge-value-small">{selectedEdge.predicate}</span>
                             </div>
                             <div className="edge-detail">
-                              <span className="edge-label">Source:</span>
+                              <span className="edge-label">Source Node</span>
                               <span className="edge-value">{getLocalName(selectedEdge.source?.id || selectedEdge.source)}</span>
                             </div>
                             <div className="edge-detail">
-                              <span className="edge-label">Target:</span>
+                              <span className="edge-label">Target Node</span>
                               <span className="edge-value">{getLocalName(selectedEdge.target?.id || selectedEdge.target)}</span>
                             </div>
                           </>

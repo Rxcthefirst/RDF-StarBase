@@ -42,13 +42,34 @@ class ParsedDocument:
     triples: List[Triple] = field(default_factory=list)
     
     def to_columnar(self) -> Tuple[List[str], List[str], List[str]]:
-        """Extract columnar data for fast ingestion."""
-        triples = self.triples
-        return (
-            [t.subject for t in triples],
-            [t.predicate for t in triples],
-            [t.object for t in triples],
-        )
+        """Extract columnar data for fast ingestion.
+        
+        Handles RDF-Star quoted triples by serializing them as << s p o >> strings.
+        """
+        subjects = []
+        predicates = []
+        objects = []
+        
+        for t in self.triples:
+            # Handle subject - may be a quoted triple
+            if t.subject_triple:
+                qt = t.subject_triple
+                s = f"<< {qt.subject} {qt.predicate} {qt.object} >>"
+            else:
+                s = t.subject
+            
+            # Handle object - may be a quoted triple
+            if t.object_triple:
+                qt = t.object_triple
+                o = f"<< {qt.subject} {qt.predicate} {qt.object} >>"
+            else:
+                o = t.object
+            
+            subjects.append(s)
+            predicates.append(t.predicate)
+            objects.append(o)
+        
+        return (subjects, predicates, objects)
 
 
 class TurtleParser:

@@ -112,7 +112,7 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
     app = FastAPI(
         title="RDF-StarBase API",
         description="A blazingly fast RDF★ database with native provenance tracking",
-        version="0.1.0",
+        version="0.2.0",
         docs_url="/docs",
         redoc_url="/redoc",
     )
@@ -148,7 +148,7 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
         """API root with basic info."""
         return {
             "name": "RDF-StarBase",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "description": "A blazingly fast RDF★ database with native provenance tracking",
             "docs": "/docs",
         }

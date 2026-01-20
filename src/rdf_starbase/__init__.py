@@ -4,7 +4,7 @@ RDF-StarBase: A blazingly fast RDF-Star database powered by Polars.
 Native RDF★ storage for assertions with provenance, trust, and temporal context.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from rdf_starbase.store import TripleStore
 from rdf_starbase.models import Triple, QuotedTriple, ProvenanceContext

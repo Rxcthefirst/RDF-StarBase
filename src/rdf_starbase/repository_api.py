@@ -88,6 +88,90 @@ def dataframe_to_records(df: pl.DataFrame) -> list[dict]:
     return records
 
 
+# Provenance predicate URIs to recognize in RDF-Star annotations
+PROV_SOURCE_PREDICATES = {
+    "http://www.w3.org/ns/prov#wasDerivedFrom",
+    "http://www.w3.org/ns/prov#wasAttributedTo",
+    "http://www.w3.org/ns/prov#hadPrimarySource",
+}
+PROV_PROCESS_PREDICATES = {
+    "http://www.w3.org/ns/prov#wasGeneratedBy",
+}
+PROV_CONFIDENCE_PREDICATES = {
+    "http://www.w3.org/ns/prov#value",
+}
+PROV_TIMESTAMP_PREDICATES = {
+    "http://www.w3.org/ns/prov#generatedAtTime",
+}
+
+
+def extract_rdfstar_annotations(parsed_result, default_source: str = "import") -> dict:
+    """
+    Extract RDF-Star annotations and separate base triples from annotation triples.
+    
+    Returns a dict with:
+    - base_triples: List of non-annotation triples (s, p, o tuples)
+    - annotations: Dict mapping (s, p, o) -> {source, confidence, process, timestamp}
+    - default_source: Fallback source for triples without annotations
+    """
+    base_triples = []
+    annotations = {}  # Key: (s, p, o) -> {source, confidence, process, timestamp}
+    
+    # Get triples list from parsed result
+    if hasattr(parsed_result, 'triples'):
+        triples = parsed_result.triples
+    elif isinstance(parsed_result, list):
+        triples = parsed_result
+    else:
+        triples = []
+    
+    for triple in triples:
+        # Check if this is an RDF-Star annotation (subject_triple is set)
+        if hasattr(triple, 'subject_triple') and triple.subject_triple is not None:
+            # This is an annotation: << s p o >> predicate object
+            qt = triple.subject_triple
+            key = (qt.subject, qt.predicate, qt.object)
+            
+            if key not in annotations:
+                annotations[key] = {}
+            
+            pred = triple.predicate
+            obj_val = triple.object
+            
+            # Extract the value (strip datatype for literals)
+            if isinstance(obj_val, str) and "^^" in obj_val:
+                obj_val = obj_val.split("^^")[0].strip('"')
+            elif isinstance(obj_val, str):
+                obj_val = obj_val.strip('"')
+            
+            if pred in PROV_SOURCE_PREDICATES:
+                annotations[key]["source"] = triple.object  # Keep full URI
+            elif pred in PROV_PROCESS_PREDICATES:
+                annotations[key]["process"] = triple.object  # Keep full URI
+            elif pred in PROV_CONFIDENCE_PREDICATES:
+                try:
+                    annotations[key]["confidence"] = float(obj_val)
+                except (ValueError, TypeError):
+                    annotations[key]["confidence"] = 1.0
+            elif pred in PROV_TIMESTAMP_PREDICATES:
+                annotations[key]["timestamp"] = obj_val
+        else:
+            # Regular triple (not an annotation)
+            if hasattr(triple, 'subject'):
+                base_triples.append((triple.subject, triple.predicate, triple.object))
+            elif isinstance(triple, dict):
+                s = triple.get("subject", triple.get("s"))
+                p = triple.get("predicate", triple.get("p"))
+                o = triple.get("object", triple.get("o"))
+                base_triples.append((s, p, o))
+    
+    return {
+        "base_triples": base_triples,
+        "annotations": annotations,
+        "default_source": default_source,
+    }
+
+
 def extract_columnar(parsed_result) -> tuple[list[str], list[str], list[str]]:
     """
     Extract columnar triple data from parser output for fast ingestion.
@@ -121,6 +205,95 @@ def extract_columnar(parsed_result) -> tuple[list[str], list[str], list[str]]:
         [t.get("predicate", t.get("p")) for t in parsed_result],
         [t.get("object", t.get("o")) for t in parsed_result],
     )
+
+
+def _parse_rdf_data(data: str, format_type: str):
+    """
+    Parse RDF data in the specified format.
+    
+    Supports all major RDF formats including RDF-Star variants.
+    
+    Args:
+        data: RDF content as string
+        format_type: Format identifier (turtle, ntriples, jsonld, etc.)
+        
+    Returns:
+        Parsed result with triples
+    """
+    format_type = format_type.lower().replace('-', '').replace('_', '').replace(' ', '')
+    
+    if format_type in ("turtle", "ttl", "turtlestar"):
+        from rdf_starbase.formats.turtle import parse_turtle
+        return parse_turtle(data)
+    
+    elif format_type in ("ntriples", "nt", "ntriplesstar"):
+        from rdf_starbase.formats.ntriples import parse_ntriples
+        return parse_ntriples(data)
+    
+    elif format_type in ("nquads", "nq"):
+        from rdf_starbase.formats.nquads import parse_nquads_as_triples
+        return parse_nquads_as_triples(data)
+    
+    elif format_type in ("n3", "notation3"):
+        from rdf_starbase.formats.n3 import parse_n3
+        return parse_n3(data)
+    
+    elif format_type in ("trig", "trigstar"):
+        from rdf_starbase.formats.trig import parse_trig_as_document
+        return parse_trig_as_document(data)
+    
+    elif format_type in ("trix",):
+        from rdf_starbase.formats.trix import parse_trix_as_document
+        return parse_trix_as_document(data)
+    
+    elif format_type in ("jsonld", "json-ld"):
+        from rdf_starbase.formats.jsonld import parse_jsonld
+        return parse_jsonld(data)
+    
+    elif format_type in ("ndjsonld", "ndjson-ld", "jsonldstream"):
+        from rdf_starbase.formats.ndjsonld import parse_ndjsonld_as_document
+        return parse_ndjsonld_as_document(data)
+    
+    elif format_type in ("rdfjson", "rdf/json"):
+        from rdf_starbase.formats.rdfjson import parse_rdfjson_as_document
+        return parse_rdfjson_as_document(data)
+    
+    elif format_type in ("rdfxml", "rdf/xml", "xml", "rdf"):
+        from rdf_starbase.formats.rdfxml import parse_rdfxml
+        return parse_rdfxml(data)
+    
+    else:
+        raise ValueError(f"Unsupported format: {format_type}. Supported formats: turtle, ntriples, nquads, n3, trig, trix, jsonld, ndjsonld, rdfjson, rdfxml")
+
+
+def _parse_binary_rdf(data: bytes):
+    """Parse Binary RDF format (requires bytes, not string)."""
+    from rdf_starbase.formats.binaryrdf import parse_binaryrdf_as_document
+    return parse_binaryrdf_as_document(data)
+
+
+# File extension to format mapping
+FORMAT_EXTENSIONS = {
+    'ttl': 'turtle',
+    'turtle': 'turtle',
+    'nt': 'ntriples',
+    'ntriples': 'ntriples',
+    'nq': 'nquads',
+    'nquads': 'nquads',
+    'n3': 'n3',
+    'trig': 'trig',
+    'trix': 'trix',
+    'rdf': 'rdfxml',
+    'xml': 'rdfxml',
+    'rdfxml': 'rdfxml',
+    'jsonld': 'jsonld',
+    'json': 'jsonld',
+    'ndjsonld': 'ndjsonld',
+    'ndjson': 'ndjsonld',
+    'rdfjson': 'rdfjson',
+    'brf': 'binaryrdf',
+    'brdf': 'binaryrdf',
+}
 
 
 def create_repository_router(
@@ -353,46 +526,76 @@ def create_repository_router(
     
     @router.post("/{name}/import")
     async def import_data(name: str, request: dict):
-        """Import RDF data in various formats (turtle, ntriples, rdfxml, jsonld)."""
+        """Import RDF data in various formats.
+        
+        Supported formats:
+        - turtle, turtle-star: Turtle and Turtle-Star
+        - ntriples: N-Triples and N-Triples-Star  
+        - nquads: N-Quads with named graphs
+        - n3: Notation3
+        - trig, trig-star: TriG with named graphs
+        - trix: TriX XML format
+        - jsonld: JSON-LD
+        - ndjsonld: Newline-delimited JSON-LD
+        - rdfjson: RDF/JSON (W3C format)
+        - rdfxml: RDF/XML
+        - binaryrdf: Binary RDF format
+        """
         try:
             store = manager.get_store(name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         
         data = request.get("data", "")
-        format_type = request.get("format", "turtle")
+        format_type = request.get("format", "turtle").lower()
+        
+        # Handle data that might come as dict (shouldn't happen but defensive)
+        if not isinstance(data, str):
+            raise HTTPException(status_code=400, detail="Data must be a string")
         
         if not data.strip():
             raise HTTPException(status_code=400, detail="No data provided")
         
         try:
-            # Use format module based on format type
-            if format_type == "turtle":
-                from rdf_starbase.formats.turtle import parse_turtle
-                triples = parse_turtle(data)
-            elif format_type == "ntriples":
-                from rdf_starbase.formats.ntriples import parse_ntriples
-                triples = parse_ntriples(data)
-            elif format_type == "rdfxml":
-                from rdf_starbase.formats.rdfxml import parse_rdfxml
-                triples = parse_rdfxml(data)
-            elif format_type == "jsonld":
-                from rdf_starbase.formats.jsonld import parse_jsonld
-                triples = parse_jsonld(data)
-            else:
-                raise HTTPException(status_code=400, detail=f"Unsupported format: {format_type}")
+            parsed = _parse_rdf_data(data, format_type)
             
-            # Extract columnar data for fast insert
-            subjects, predicates, objects = extract_columnar(triples)
+            # Extract RDF-Star annotations and base triples
+            rdfstar_data = extract_rdfstar_annotations(parsed, default_source="import")
+            base_triples = rdfstar_data["base_triples"]
+            annotations = rdfstar_data["annotations"]
             
-            # Use columnar insert (fastest path)
-            count = store.add_triples_columnar(
-                subjects=subjects,
-                predicates=predicates,
-                objects=objects,
-                source="import",
-                confidence=1.0,
-            )
+            # Group triples by provenance for batch columnar inserts
+            prov_groups = {}  # (source, confidence) -> [(s, p, o), ...]
+            
+            for s, p, o in base_triples:
+                key = (s, p, o)
+                if key in annotations:
+                    ann = annotations[key]
+                    source = ann.get("source", "import")
+                    confidence = ann.get("confidence", 1.0)
+                else:
+                    source = "import"
+                    confidence = 1.0
+                
+                prov_key = (source, confidence)
+                if prov_key not in prov_groups:
+                    prov_groups[prov_key] = []
+                prov_groups[prov_key].append((s, p, o))
+            
+            # Batch columnar insert for each provenance group
+            count = 0
+            for (source, confidence), triples_list in prov_groups.items():
+                subjects = [t[0] for t in triples_list]
+                predicates = [t[1] for t in triples_list]
+                objects = [t[2] for t in triples_list]
+                count += store.add_triples_columnar(
+                    subjects=subjects,
+                    predicates=predicates,
+                    objects=objects,
+                    source=source,
+                    confidence=confidence,
+                )
+            
             manager.save(name)
             
             return {
@@ -408,12 +611,15 @@ def create_repository_router(
     async def upload_file(
         name: str,
         file: UploadFile = File(...),
-        format: str = Form(None, description="Format: turtle, ntriples, rdfxml, jsonld (auto-detect from extension if not provided)")
+        format: str = Form(None, description="Format: turtle, ntriples, nquads, n3, trig, trix, jsonld, ndjsonld, rdfjson, rdfxml, binaryrdf (auto-detect from extension if not provided)")
     ):
         """
         Upload an RDF file directly for fast import.
         
-        Supports: .ttl, .nt, .rdf, .xml, .jsonld, .json
+        Supported extensions: .ttl, .nt, .nq, .n3, .trig, .trix, .jsonld, .json, 
+                             .ndjsonld, .ndjson, .rdfjson, .rdf, .xml, .brf
+        
+        Formats with RDF-Star support: turtle, ntriples, trig
         """
         try:
             store = manager.get_store(name)
@@ -423,55 +629,63 @@ def create_repository_router(
         # Auto-detect format from filename
         if not format:
             ext = file.filename.split('.')[-1].lower() if file.filename else ''
-            format_map = {
-                'ttl': 'turtle',
-                'turtle': 'turtle',
-                'nt': 'ntriples',
-                'ntriples': 'ntriples',
-                'rdf': 'rdfxml',
-                'xml': 'rdfxml',
-                'rdfxml': 'rdfxml',
-                'jsonld': 'jsonld',
-                'json': 'jsonld',
-            }
-            format = format_map.get(ext, 'turtle')
+            format = FORMAT_EXTENSIONS.get(ext, 'turtle')
         
         try:
             start_time = time.time()
             
             # Read file content
             content = await file.read()
-            data = content.decode('utf-8')
             
-            # Parse based on format
-            if format == "turtle":
-                from rdf_starbase.formats.turtle import parse_turtle
-                triples = parse_turtle(data)
-            elif format == "ntriples":
-                from rdf_starbase.formats.ntriples import parse_ntriples
-                triples = parse_ntriples(data)
-            elif format == "rdfxml":
-                from rdf_starbase.formats.rdfxml import parse_rdfxml
-                triples = parse_rdfxml(data)
-            elif format == "jsonld":
-                from rdf_starbase.formats.jsonld import parse_jsonld
-                triples = parse_jsonld(data)
+            # Handle binary format specially
+            if format == "binaryrdf":
+                triples = _parse_binary_rdf(content)
             else:
-                raise HTTPException(status_code=400, detail=f"Unsupported format: {format}")
+                data = content.decode('utf-8')
+                triples = _parse_rdf_data(data, format)
             
             parse_time = time.time() - start_time
             
-            # Extract columnar data for fast insert
-            subjects, predicates, objects = extract_columnar(triples)
-            
             insert_start = time.time()
-            count = store.add_triples_columnar(
-                subjects=subjects,
-                predicates=predicates,
-                objects=objects,
-                source=f"file:{file.filename}",
-                confidence=1.0,
-            )
+            
+            # Extract RDF-Star annotations and base triples
+            default_source = f"file:{file.filename}"
+            rdfstar_data = extract_rdfstar_annotations(triples, default_source=default_source)
+            base_triples = rdfstar_data["base_triples"]
+            annotations = rdfstar_data["annotations"]
+            
+            # Group triples by provenance for batch columnar inserts
+            prov_groups = {}  # (source, confidence) -> [(s, p, o), ...]
+            
+            for s, p, o in base_triples:
+                key = (s, p, o)
+                if key in annotations:
+                    ann = annotations[key]
+                    source = ann.get("source", default_source)
+                    confidence = ann.get("confidence", 1.0)
+                else:
+                    source = default_source
+                    confidence = 1.0
+                
+                prov_key = (source, confidence)
+                if prov_key not in prov_groups:
+                    prov_groups[prov_key] = []
+                prov_groups[prov_key].append((s, p, o))
+            
+            # Batch columnar insert for each provenance group
+            count = 0
+            for (source, confidence), triples_list in prov_groups.items():
+                subjects = [t[0] for t in triples_list]
+                predicates = [t[1] for t in triples_list]
+                objects = [t[2] for t in triples_list]
+                count += store.add_triples_columnar(
+                    subjects=subjects,
+                    predicates=predicates,
+                    objects=objects,
+                    source=source,
+                    confidence=confidence,
+                )
+            
             insert_time = time.time() - insert_start
             
             manager.save(name)
