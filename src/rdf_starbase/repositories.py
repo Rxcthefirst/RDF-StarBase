@@ -9,16 +9,23 @@ Features:
 - Persist repositories to disk
 - Switch between repositories
 - List all repositories with metadata
+- Backup/restore/clone repositories
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import json
 import shutil
+import uuid
 
 from rdf_starbase.store import TripleStore
+from rdf_starbase.storage.backup import (
+    BackupManager,
+    BackupManifest,
+    RestoreOptions,
+)
 
 
 @dataclass
@@ -28,6 +35,12 @@ class RepositoryInfo:
     created_at: datetime
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    
+    # Unique ID (stable across renames)
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    
+    # Schema version for migrations
+    schema_version: int = 1
     
     # Stats (populated on demand)
     triple_count: int = 0
@@ -40,6 +53,8 @@ class RepositoryInfo:
             "created_at": self.created_at.isoformat(),
             "description": self.description,
             "tags": self.tags,
+            "uuid": self.uuid,
+            "schema_version": self.schema_version,
             "triple_count": self.triple_count,
             "subject_count": self.subject_count,
             "predicate_count": self.predicate_count,
@@ -52,6 +67,8 @@ class RepositoryInfo:
             created_at=datetime.fromisoformat(data["created_at"]),
             description=data.get("description", ""),
             tags=data.get("tags", []),
+            uuid=data.get("uuid", str(uuid.uuid4())),
+            schema_version=data.get("schema_version", 1),
             triple_count=data.get("triple_count", 0),
             subject_count=data.get("subject_count", 0),
             predicate_count=data.get("predicate_count", 0),
@@ -405,3 +422,213 @@ class RepositoryManager:
         
         self._save_metadata(name)
         return info
+
+    def clone(
+        self,
+        source_name: str,
+        target_name: str,
+        description: Optional[str] = None,
+    ) -> RepositoryInfo:
+        """
+        Clone a repository to a new name.
+        
+        Creates a complete copy of the source repository including
+        all data, but with a new name and UUID.
+        
+        Args:
+            source_name: Name of repository to clone
+            target_name: Name for the new cloned repository
+            description: Optional description (defaults to "Clone of {source}")
+            
+        Returns:
+            RepositoryInfo for the cloned repository
+            
+        Raises:
+            ValueError: If source doesn't exist or target already exists
+        """
+        if source_name not in self._info:
+            raise ValueError(f"Source repository '{source_name}' does not exist")
+        if target_name in self._info:
+            raise ValueError(f"Target repository '{target_name}' already exists")
+        if not all(c.isalnum() or c in '-_' for c in target_name):
+            raise ValueError("Repository name can only contain alphanumeric characters, hyphens, and underscores")
+        
+        # Save source first to ensure we have latest data
+        if source_name in self._stores:
+            self.save(source_name)
+        
+        # Copy the directory
+        source_dir = self.workspace_path / source_name
+        target_dir = self.workspace_path / target_name
+        
+        if source_dir.exists():
+            shutil.copytree(source_dir, target_dir)
+        else:
+            target_dir.mkdir(parents=True)
+        
+        # Create new metadata with new UUID
+        source_info = self._info[source_name]
+        target_info = RepositoryInfo(
+            name=target_name,
+            created_at=datetime.now(timezone.utc),
+            description=description or f"Clone of {source_name}",
+            tags=source_info.tags.copy(),
+            uuid=str(uuid.uuid4()),  # New UUID for clone
+            schema_version=source_info.schema_version,
+            triple_count=source_info.triple_count,
+            subject_count=source_info.subject_count,
+            predicate_count=source_info.predicate_count,
+        )
+        
+        self._info[target_name] = target_info
+        self._save_metadata(target_name)
+        
+        return target_info
+    
+    def snapshot(
+        self,
+        name: str,
+        description: str = "",
+        tags: Optional[List[str]] = None,
+    ) -> BackupManifest:
+        """
+        Create a backup snapshot of a repository.
+        
+        Args:
+            name: Repository name
+            description: Backup description
+            tags: Optional tags for the backup
+            
+        Returns:
+            BackupManifest describing the snapshot
+            
+        Raises:
+            ValueError: If repository doesn't exist
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+        
+        # Save first
+        if name in self._stores:
+            self.save(name)
+        
+        # Get backup directory
+        backup_dir = self.workspace_path / "_backups"
+        manager = BackupManager(backup_dir)
+        
+        info = self._info[name]
+        repo_dir = self.workspace_path / name
+        
+        return manager.snapshot(
+            source_path=repo_dir,
+            repo_name=name,
+            description=description,
+            tags=tags,
+            repo_uuid=info.uuid,
+        )
+    
+    def restore(
+        self,
+        snapshot_id: str,
+        target_name: str,
+        overwrite: bool = False,
+    ) -> RepositoryInfo:
+        """
+        Restore a repository from a backup snapshot.
+        
+        Args:
+            snapshot_id: ID of the snapshot to restore
+            target_name: Name for the restored repository
+            overwrite: If True, overwrite existing repository
+            
+        Returns:
+            RepositoryInfo for the restored repository
+            
+        Raises:
+            ValueError: If snapshot doesn't exist or target conflicts
+        """
+        if target_name in self._info and not overwrite:
+            raise ValueError(
+                f"Repository '{target_name}' already exists. "
+                "Use overwrite=True to replace."
+            )
+        
+        if not all(c.isalnum() or c in '-_' for c in target_name):
+            raise ValueError("Repository name can only contain alphanumeric characters, hyphens, and underscores")
+        
+        # Get backup directory
+        backup_dir = self.workspace_path / "_backups"
+        manager = BackupManager(backup_dir)
+        
+        # Verify snapshot exists
+        manifest = manager.get_backup(snapshot_id)
+        if not manifest:
+            raise ValueError(f"Snapshot '{snapshot_id}' not found")
+        
+        target_dir = self.workspace_path / target_name
+        
+        # If overwriting, delete existing first
+        if target_name in self._info and overwrite:
+            self.delete(target_name, force=True)
+        
+        # Restore files
+        manager.restore(
+            snapshot_id=snapshot_id,
+            target_path=target_dir,
+            options=RestoreOptions(
+                target_name=target_name,
+                overwrite=overwrite,
+            ),
+        )
+        
+        # Create new metadata (restored repo gets new identity)
+        info = RepositoryInfo(
+            name=target_name,
+            created_at=datetime.now(timezone.utc),
+            description=f"Restored from {manifest.repository_name} ({snapshot_id})",
+            tags=manifest.tags.copy() if manifest.tags else [],
+            uuid=str(uuid.uuid4()),  # New UUID for restored repo
+            triple_count=manifest.fact_count,
+        )
+        
+        self._info[target_name] = info
+        self._save_metadata(target_name)
+        
+        return info
+    
+    def list_backups(
+        self,
+        repo_name: Optional[str] = None,
+    ) -> List[BackupManifest]:
+        """
+        List available backups.
+        
+        Args:
+            repo_name: Filter by repository name (optional)
+            
+        Returns:
+            List of backup manifests
+        """
+        backup_dir = self.workspace_path / "_backups"
+        if not backup_dir.exists():
+            return []
+        
+        manager = BackupManager(backup_dir)
+        return manager.list_backups(repo_name=repo_name)
+    
+    def delete_backup(self, snapshot_id: str) -> bool:
+        """
+        Delete a backup.
+        
+        Args:
+            snapshot_id: ID of snapshot to delete
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        backup_dir = self.workspace_path / "_backups"
+        if not backup_dir.exists():
+            return False
+        
+        manager = BackupManager(backup_dir)
+        return manager.delete_backup(snapshot_id)

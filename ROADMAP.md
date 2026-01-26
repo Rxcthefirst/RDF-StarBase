@@ -4,32 +4,48 @@
 
 ---
 
-## Current Status: Alpha Release Ready ✅
+## Current Status: v0.3.0 Complete ✅
 
-RDF-StarBase is **production-ready for early adopters**. The core functionality is complete, tested, and benchmarked.
+RDF-StarBase now has a **complete product workflow layer** (1095 tests, 72% coverage). The transformation from "engine" to "database product" is complete!
 
-### What's Done (v0.1.0)
+### Architecture Assessment
+
+| Layer | Score | Status |
+|-------|-------|--------|
+| **Storage Engine** | 9/10 | ✅ WAL, ACID, partitioning, indexes, memory budget |
+| **Repository Manager** | 9/10 | ✅ Backup/restore, clone, versioning, config |
+| **Product Workflows** | 8/10 | ✅ Staging, observability, graph explorer, query tools |
+
+### What's Done (v0.1.0 + v0.2.0 + v0.3.0)
 
 | Category | Features | Tests |
 |----------|----------|-------|
 | **Core Storage** | Dictionary-encoded columnar storage, RDF-Star native, Polars backend | ✅ |
 | **SPARQL Query** | SELECT, ASK, CONSTRUCT, DESCRIBE | ✅ |
 | **SPARQL Patterns** | OPTIONAL, UNION, MINUS, FILTER, BIND, VALUES, GRAPH, EXISTS/NOT EXISTS | ✅ |
-| **Property Paths** | Sequence `/`, Alternative `\|`, Inverse `^`, Modifiers `*`, `+`, `?` | ✅ |
+| **Property Paths** | Sequence `/`, Alternative `\|`, Inverse `^`, Modifiers `*`, `+`, `?`, `{n,m}` | ✅ |
 | **Aggregates** | COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, SAMPLE, GROUP BY, HAVING | ✅ |
-| **Functions** | COALESCE, IF, STRLEN, CONTAINS, STRSTARTS, STRENDS, LCASE, UCASE | ✅ |
+| **Functions** | COALESCE, IF, STRLEN, CONTAINS, STRSTARTS, STRENDS, LCASE, UCASE, BOUND | ✅ |
 | **SPARQL Update** | INSERT DATA, DELETE DATA, DELETE WHERE, DELETE/INSERT WHERE | ✅ |
 | **Graph Management** | Named graphs, CREATE, DROP, CLEAR, COPY, MOVE, ADD, LOAD | ✅ |
 | **Time-Travel** | AS OF clause for temporal queries | ✅ |
-| **Formats** | Turtle, N-Triples, RDF/XML, JSON-LD (parse + serialize) | ✅ |
-| **Persistence** | Parquet-based save/load | ✅ |
+| **Formats** | Turtle, N-Triples, RDF/XML, JSON-LD, TriG, N-Quads (parse + serialize) | ✅ |
+| **Persistence** | Parquet-based, WAL, incremental delta files, streaming load | ✅ |
 | **Reasoning** | RDFS + OWL (subClassOf, sameAs, inverseOf, transitiveProperty) | ✅ |
 | **AI Grounding** | /ai/query, /ai/verify, /ai/context, /ai/materialize | ✅ |
 | **REST API** | FastAPI endpoints for all features | ✅ |
 | **rdflib Compat** | Drop-in replacement layer | ✅ |
-| **Visualization** | React + D3 graph visualization | ✅ |
+| **Visualization** | React + D3 graph visualization with Monaco editor | ✅ |
+| **Database Features** | WAL, ACID transactions, connection pooling, memory budget | ✅ |
+| **Indexing** | B-tree sorted index, predicate partitioning, query timeout/cancel | ✅ |
+| **Backup/Restore** | Snapshot API, restore to new repo, clone with UUID versioning | ✅ |
+| **Import Workflow** | Staging area, preview, validation, dry-run, job tracking, undo | ✅ |
+| **Query Tools** | Saved queries, history, slow query log, export, cursor pagination | ✅ |
+| **Graph Explorer** | List graphs, DCAT/PROV metadata, statistics, replace/drop/copy | ✅ |
+| **Observability** | Metrics collection, health checks, admin dashboard data | ✅ |
+| **Repository Config** | Schema versioning, migrations, per-repo configuration | ✅ |
 
-**Test Suite:** 503 tests, 71% coverage  
+**Test Suite:** 1095 tests, 72% coverage  
 **Benchmarks:** 10-72x faster than rdflib
 
 ---
@@ -37,125 +53,116 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 ## Release Milestones
 
 ### v0.1.0 — Alpha (Q1 2026) ✅ SHIPPED
-
-**Goal:** PyPI publication, early adopter feedback
-
-- [x] **PyPI publication** (`pip install rdf-starbase`) — **LIVE on PyPI**
-- [x] **CI/CD Pipeline** — GitHub Actions for test, benchmark, publish
-- [x] **Documentation site** — MkDocs + ReadTheDocs config
-- [x] **Quickstart guide** — `docs/quickstart.md`
-- [x] **API reference** — Auto-generated from docstrings
-- [x] **LICENSE file** — MIT License
-- [x] **Benchmark reproducibility** — CI runs benchmarks on every push
-- [x] **Performance baseline** — `benchmarks/bench_query.py` (200K triples/sec insert, 10-20ms queries)
-
-**Marketing:**
-- Add to Ontus.io product page
-- Blog post: "rdflib for the AI Era"
-- Post on r/semanticweb, HackerNews, Twitter/X
-
----
-
 ### v0.2.0 — Beta (Q2 2026) ✅ SHIPPED
+### v0.3.0 — Product Workflows (Q3 2026) ✅ SHIPPED
 
-**Goal:** Production hardening with modern web interface and Docker deployment
-
-#### Web Interface & Visualization
-- [x] **Monaco SPARQL Editor** — Syntax highlighting with @monaco-editor/react
-- [x] **Schema Browser** — Classes and properties viewer with click-to-insert
-- [x] **Import/Export UI** — File upload (Turtle, RDF/XML, N-Triples, JSON-LD)
-- [x] **Graph Visualization** — D3.js force-directed graph with node/edge interactions
-- [x] **Provenance Panel** — Node properties with RDF-Star metadata display
-- [x] **Catppuccin Theme** — Mocha dark and Latte light theme support
-
-#### Docker Deployment
-- [x] **Multi-stage Dockerfile** — Node 20 Alpine → Python 3.12 slim
-- [x] **docker-compose.yml** — Volume persistence for repository data
-- [x] **Production build** — Vite-optimized frontend with proper asset paths
-- [x] **Container orchestration** — Single-container deployment with embedded frontend
-
-#### Performance Enhancements
-- [x] **Columnar insertion** — `add_triples_columnar()` bypasses dict conversion
-- [x] **Lazy DataFrame materialization** — `_df` property uses Polars lazy evaluation
-- [x] **Short-circuit optimization** — Early exit when pattern terms don't exist in store
-- [x] **Fast term lookup** — O(1) `get_iri_id()` / `get_literal_id()` using cached dictionaries
-- [x] **Query plan caching** — LRU cache for parsed queries (21,000x speedup for repeated queries)
-- [x] **Memory-mapped Parquet** — `load_streaming()` with `scan_parquet(memory_map=True)`
-- [x] **Parallel pattern execution** — ThreadPoolExecutor for independent pattern groups (opt-in for federated queries)
-- [x] **Lazy loading for large graphs** — Streaming collect for out-of-core processing
-
-#### SPARQL Completeness
-- [x] **EXISTS / NOT EXISTS** — Filter patterns with subquery existence checks
-- [x] **COALESCE, IF functions** — Conditional expressions in SELECT and FILTER
-- [x] **String functions** — STRLEN, CONTAINS, STRSTARTS, STRENDS, LCASE, UCASE
-- [x] **BOUND function** — Check if optional variable is bound (with OPTIONAL null column support)
-- [x] **BIND in nested patterns** — BIND within UNION, OPTIONAL, MINUS, EXISTS, GRAPH
-- [x] **Subqueries** — Nested SELECT in WHERE clause with aggregates
-- [x] **Property path {n,m}** — Fixed-length path modifiers ({n}, {n,m}, {n,})
-
-#### Persistence Enhancements
-- [x] **Streaming load** — Memory-mapped Parquet loading for large datasets
-- [x] **DuckDB SQL interface** — SQL access to columnar RDF data for analytical workloads
-- [x] **Named graph loading** — `graph_target` parameter: 'default', 'named:<uri>', 'auto' (from filename)
-- [x] **Incremental persistence** — Delta files + compaction to avoid full rewrites
-
-#### Database Features (Durability & Operations)
-- [x] **Write-ahead log (WAL)** — Binary format with CRC32 checksums, segment rotation, checkpoint/replay
-- [x] **Connection pooling** — Thread-safe concurrent access with reader-writer locks
-- [x] **Query timeout/cancellation** — Resource governance with CancellationToken and QueryStats
-- [x] **EXPLAIN query plans** — Pattern selectivity estimation, join analysis, cost metrics
-
-#### Transaction Safety
-- [x] **ACID transactions** — TransactionManager with begin/commit/rollback, context manager support
-- [x] **Concurrent write safety** — WAL-backed transactions with rollback on exception
-- [x] **Crash recovery guarantees** — WAL replay with checkpoint state restoration
-
-#### Scale & Performance
-- [x] **Partitioning by predicate** — Predicate-based table sharding with LRU eviction
-- [x] **B-tree index for selective lookups** — Sorted index with binary search for O(log n) point queries
-- [x] **Memory budget enforcement** — LRU-based spill-to-disk when memory pressure exceeds threshold
-- [x] **Lazy loading for large graphs** — Streaming collect for out-of-core processing
+*See archived sections below for completed features.*
 
 ---
 
-### v0.3.0 — Trust & Governance (Q3 2026)
+### v0.4.0 — Trust & Security (Q4 2026)
 
-**Goal:** Enterprise features for data governance
+**Goal:** Transform from "engine" to "database product" with real-world workflows
 
-#### Trust Scoring
-- [ ] Configurable trust policies per source
-- [ ] Confidence decay over time
-- [ ] Conflict resolution strategies (most-recent, highest-confidence, manual)
-- [ ] Trust inheritance for inferred facts
+#### Repository Lifecycle (Priority: HIGH) ✅
+- [x] **Backup/snapshot API** — `repo.snapshot()` creates point-in-time backup with manifest ✅
+- [x] **Restore to new repo** — `manager.restore(snapshot_path, new_name)` never overwrites ✅
+- [x] **Clone repository** — `manager.clone(source, target)` with copy-on-write option ✅
+- [x] **Repository versioning** — Schema version in metadata, migration path for upgrades ✅
+- [x] **Per-repo configuration** — Reasoning rules, memory limits, sharding config per repo ✅
+- [x] **Repository UUIDs** — Stable IDs separate from mutable display names ✅
 
-#### Governance Workflows
-- [ ] Approval workflows for assertions
-- [ ] Audit log export
-- [ ] Data lineage visualization
-- [ ] Source health monitoring
+#### Import Workflow (Priority: HIGH) ✅
+- [x] **Staging area** — Imports go to staging manifest before commit ✅
+- [x] **Preview before commit** — Show term/fact/graph counts, warnings, errors ✅
+- [x] **Validation layer** — Check IRI syntax, datatype validity, RDF-Star structure ✅
+- [x] **Dry-run mode** — `import(file, dry_run=True)` returns stats without persisting ✅
+- [x] **Undo last import** — Per-commit rollback via WAL transaction IDs ✅
+- [x] **Import job tracking** — Progress, status, error log for large imports ✅
+
+#### Query Workspace (Priority: MEDIUM) ✅
+- [x] **Saved queries** — Persist queries to repo metadata with name, description, tags ✅
+- [x] **Query history** — Last N queries with timestamps, stored per-session or per-repo ✅
+- [ ] **SQL tab in UI** — DuckDB interface alongside SPARQL editor (deferred to v0.4.0)
+- [x] **Export results** — CSV, JSON, TSV, JSONL, Parquet download from result grid ✅
+- [x] **Pagination with cursors** — Efficient cursor-based paging beyond LIMIT/OFFSET ✅
+
+#### Graph Explorer (Priority: MEDIUM) ✅
+- [x] **Graph list view** — Named graphs with counts, last modified, source info ✅
+- [x] **Graph metadata panel** — DCAT/PROV/DCT structured view (creator, created, source) ✅
+- [x] **Per-graph statistics** — Subject/predicate/object counts, RDF-Star annotation counts ✅
+- [x] **"Replace graph" action** — Drop + reload from file in single operation ✅
+
+#### Observability (Priority: MEDIUM) ✅
+- [x] **Metrics collection** — Ingest rate, query latency, memory usage, compaction status ✅
+- [x] **Stats API endpoint** — `/metrics` with JSON or Prometheus format ✅
+- [x] **Admin dashboard** — Web UI showing key metrics over time ✅
+- [x] **Slow query log** — Queries exceeding threshold logged with EXPLAIN plan ✅
 
 ---
 
-### v1.0.0 — Production (Q4 2026)
+### v0.4.0 — Trust & Security (Q4 2026)
 
-**Goal:** Enterprise-grade, federation-ready
+**Goal:** Enterprise-ready authentication and data governance
+
+#### Authentication & Authorization (Priority: HIGH)
+- [ ] **API key management** — Generate, revoke, list API keys
+- [ ] **Role-based access** — Reader, Writer, Admin roles per repository
+- [ ] **Scoped tokens** — Tokens with specific repo/operation permissions
+- [ ] **Rate limiting** — Per-key query/ingestion rate limits
+
+#### Audit & Compliance (Priority: MEDIUM)
+- [ ] **Audit log** — Who loaded data, who ran queries, when
+- [ ] **Audit log export** — CSV/JSON export for compliance
+- [ ] **Data lineage view** — Visual lineage from source to derived facts
+- [ ] **Source health monitoring** — Track freshness, error rates per source
+
+#### Trust Scoring (Priority: MEDIUM)
+- [ ] **Configurable trust policies** — Per-source confidence rules
+- [ ] **Confidence decay** — Time-based decay for aging assertions
+- [ ] **Conflict resolution** — Strategies: most-recent, highest-confidence, manual review
+- [ ] **Trust inheritance** — Inferred facts inherit trust from premises
+
+---
+
+### v1.0.0 — Production (Q1 2027)
+
+**Goal:** Enterprise-grade, federation-ready, certified
 
 #### Federation
-- [ ] SERVICE clause (SPARQL 1.1 Federated Query)
-- [ ] Cross-instance synchronization
-- [ ] Distributed query planning
+- [ ] **SERVICE clause** — SPARQL 1.1 Federated Query
+- [ ] **Cross-instance sync** — Replicate between RDF-StarBase instances
+- [ ] **Distributed query planning** — Push filters to remote endpoints
 
-#### Enterprise Features
-- [ ] Authentication & authorization
-- [ ] Multi-tenancy
-- [ ] Kubernetes deployment manifests
-- [ ] Prometheus metrics endpoint
-- [ ] OpenTelemetry tracing
+#### Enterprise Operations
+- [ ] **Multi-tenancy** — Isolated namespaces with resource quotas
+- [ ] **Kubernetes manifests** — Helm chart with StatefulSet, PVC, Ingress
+- [ ] **Prometheus endpoint** — `/metrics` in Prometheus exposition format
+- [ ] **OpenTelemetry tracing** — Distributed traces for query execution
+- [ ] **Health checks** — `/health`, `/ready` endpoints for orchestration
 
 #### Certification
-- [ ] W3C SPARQL 1.1 compliance test suite
-- [ ] RDF-Star Working Group test suite
-- [ ] Security audit
+- [ ] **W3C SPARQL 1.1 test suite** — Full compliance verification
+- [ ] **RDF-Star Working Group tests** — Quoted triple edge cases
+- [ ] **Security audit** — Third-party review of auth, data isolation
+
+---
+
+### v1.1.0 — Governance & Ontologies (Q2 2027)
+
+**Goal:** Guide users toward standard ontologies without blocking power users
+
+#### Ontology Packs
+- [ ] **PROV-O pack** — Agent, Activity, Entity templates
+- [ ] **DCAT pack** — Dataset, Distribution, Catalog templates
+- [ ] **PAV pack** — Provenance, Authoring, Versioning shortcuts
+- [ ] **Enable/disable per repo** — Ontology packs as optional repo config
+
+#### Schema Guidance
+- [ ] **SHACL validation** — Validate on import, show warnings/errors
+- [ ] **Auto-complete from ranges** — Suggest types based on predicate domains
+- [ ] **"Annotate statement" wizard** — UI for adding RDF-Star metadata
+- [ ] **Template forms** — Create PROV entities via form, not raw SPARQL
 
 ---
 
@@ -168,13 +175,44 @@ These are **not planned** because they conflict with our architecture:
 | **Disk-based triple store** | We're columnar-first; use Parquet/DuckDB for persistence |
 | **Full-text search built-in** | Integrate with external FTS (Elasticsearch, Typesense) |
 | **OWL 2 Full reasoning** | Computational complexity; we support useful OWL subsets |
-| **SHACL validation** | Planned as separate package (`rdf-starbase-shacl`) |
+| **Heavy ORM abstraction** | Direct SPARQL/SQL access is the interface; no magic |
+| **Distributed consensus** | Single-node focus; use external coordination if needed |
+
+---
+
+## Implementation Priority Matrix
+
+### v0.3.0 Sprint Plan
+
+| Week | Focus | Deliverables |
+|------|-------|--------------|
+| 1-2 | **Backup/Restore** | `snapshot()`, `restore()`, snapshot manifest format |
+| 3-4 | **Clone + Versioning** | `clone()`, repo UUIDs, schema version field |
+| 5-6 | **Import Staging** | Staging manifest, preview stats, validation errors |
+| 7-8 | **Undo Import** | Per-commit rollback, import job tracking |
+| 9-10 | **Saved Queries** | Query persistence, history, UI integration |
+| 11-12 | **Observability** | Metrics collection, stats API, admin dashboard |
+
+### Success Criteria
+
+| Feature | Metric |
+|---------|--------|
+| Backup/Restore | Round-trip 1M triples in < 30s |
+| Import Staging | Preview 100K triples in < 5s |
+| Saved Queries | Persist/load 1000 queries |
+| Observability | < 1% overhead from metrics collection |
 
 ---
 
 ## How to Contribute
 
-### Priority Areas
+### Priority Areas for v0.3.0
+1. **Backup/restore testing** — Large dataset round-trips, corruption recovery
+2. **Import edge cases** — Malformed files, encoding issues, huge files
+3. **UI/UX feedback** — Admin dashboard design, query workspace usability
+4. **Observability integration** — Prometheus/Grafana dashboards, alerting rules
+
+### General Contributions
 1. **Bug reports** — File issues with reproducible examples
 2. **SPARQL edge cases** — Complex queries that fail or produce wrong results
 3. **Performance regressions** — Queries that are slower than expected
@@ -184,7 +222,7 @@ These are **not planned** because they conflict with our architecture:
 1. Fork the repository
 2. Create a feature branch
 3. Add tests for new functionality
-4. Ensure all 491+ tests pass
+4. Ensure all 746+ tests pass
 5. Submit a pull request
 
 ---
