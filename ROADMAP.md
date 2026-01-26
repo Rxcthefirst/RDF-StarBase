@@ -101,7 +101,7 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 
 #### Database Features (Durability & Operations)
 - [x] **Write-ahead log (WAL)** — Binary format with CRC32 checksums, segment rotation, checkpoint/replay
-- [ ] **Connection pooling** — Thread-safe concurrent access
+- [x] **Connection pooling** — Thread-safe concurrent access with reader-writer locks
 - [x] **Query timeout/cancellation** — Resource governance with CancellationToken and QueryStats
 - [x] **EXPLAIN query plans** — Pattern selectivity estimation, join analysis, cost metrics
 
@@ -111,9 +111,9 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 - [x] **Crash recovery guarantees** — WAL replay with checkpoint state restoration
 
 #### Scale & Performance
-- [ ] **Partitioning by predicate** — Predicate-based table sharding for large datasets
-- [ ] **B-tree index for selective lookups** — Fast point queries on high-cardinality columns
-- [ ] **Memory budget enforcement** — Spill-to-disk when memory pressure exceeds threshold
+- [x] **Partitioning by predicate** — Predicate-based table sharding with LRU eviction
+- [x] **B-tree index for selective lookups** — Sorted index with binary search for O(log n) point queries
+- [x] **Memory budget enforcement** — LRU-based spill-to-disk when memory pressure exceeds threshold
 - [x] **Lazy loading for large graphs** — Streaming collect for out-of-core processing
 
 ---

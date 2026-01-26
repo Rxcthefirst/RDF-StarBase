@@ -54,6 +54,41 @@ from rdf_starbase.storage.query_context import (
     execute_with_timeout,
     query_timeout,
 )
+from rdf_starbase.storage.connection_pool import (
+    ConnectionPool,
+    SharedExecutorPool,
+    PooledConnection,
+    PoolStats,
+    ConnectionMode,
+    PoolExhaustedError,
+)
+from rdf_starbase.storage.partitioning import (
+    PredicatePartitioner,
+    PartitionInfo,
+    PartitionStats as PredicatePartitionStats,
+)
+from rdf_starbase.storage.indexing import (
+    SortedIndex,
+    IndexManager,
+    IndexStats,
+    IndexEntry,
+    indexed_filter,
+    estimate_selectivity,
+    should_use_index,
+)
+from rdf_starbase.storage.memory_budget import (
+    MemoryBudget,
+    MemoryGuard,
+    MemoryStats,
+    MemoryPressure,
+    BudgetedStore,
+    estimate_size,
+    configure_budget,
+    get_budget,
+    track,
+    untrack,
+    enforce,
+)
 
 __all__ = [
     "TermKind",
@@ -103,4 +138,35 @@ __all__ = [
     "QueryExecutionManager",
     "execute_with_timeout",
     "query_timeout",
+    # Connection Pooling
+    "ConnectionPool",
+    "SharedExecutorPool",
+    "PooledConnection",
+    "PoolStats",
+    "ConnectionMode",
+    "PoolExhaustedError",
+    # Predicate Partitioning
+    "PredicatePartitioner",
+    "PartitionInfo",
+    "PredicatePartitionStats",
+    # Indexing
+    "SortedIndex",
+    "IndexManager",
+    "IndexStats",
+    "IndexEntry",
+    "indexed_filter",
+    "estimate_selectivity",
+    "should_use_index",
+    # Memory Budget
+    "MemoryBudget",
+    "MemoryGuard",
+    "MemoryStats",
+    "MemoryPressure",
+    "BudgetedStore",
+    "estimate_size",
+    "configure_budget",
+    "get_budget",
+    "track",
+    "untrack",
+    "enforce",
 ]
