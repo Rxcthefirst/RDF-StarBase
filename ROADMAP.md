@@ -95,8 +95,26 @@ RDF-StarBase is **production-ready for early adopters**. The core functionality 
 
 #### Persistence Enhancements
 - [x] **Streaming load** — Memory-mapped Parquet loading for large datasets
-- [ ] DuckDB backend option (SQL interface to Parquet, analytical workloads)
-- [ ] Incremental persistence (append-only, avoid full rewrites)
+- [x] **DuckDB SQL interface** — SQL access to columnar RDF data for analytical workloads
+- [x] **Named graph loading** — `graph_target` parameter: 'default', 'named:<uri>', 'auto' (from filename)
+- [x] **Incremental persistence** — Delta files + compaction to avoid full rewrites
+
+#### Database Features (Durability & Operations)
+- [x] **Write-ahead log (WAL)** — Binary format with CRC32 checksums, segment rotation, checkpoint/replay
+- [ ] **Connection pooling** — Thread-safe concurrent access
+- [x] **Query timeout/cancellation** — Resource governance with CancellationToken and QueryStats
+- [x] **EXPLAIN query plans** — Pattern selectivity estimation, join analysis, cost metrics
+
+#### Transaction Safety
+- [x] **ACID transactions** — TransactionManager with begin/commit/rollback, context manager support
+- [x] **Concurrent write safety** — WAL-backed transactions with rollback on exception
+- [x] **Crash recovery guarantees** — WAL replay with checkpoint state restoration
+
+#### Scale & Performance
+- [ ] **Partitioning by predicate** — Predicate-based table sharding for large datasets
+- [ ] **B-tree index for selective lookups** — Fast point queries on high-cardinality columns
+- [ ] **Memory budget enforcement** — Spill-to-disk when memory pressure exceeds threshold
+- [x] **Lazy loading for large graphs** — Streaming collect for out-of-core processing
 
 ---
 

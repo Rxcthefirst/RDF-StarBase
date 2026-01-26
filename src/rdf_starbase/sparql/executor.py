@@ -182,6 +182,47 @@ class SPARQLExecutor:
                 vars_set.add(qt.object.name)
         return vars_set
     
+    def _extract_explicit_bindings(
+        self, 
+        where: WhereClause, 
+        prefixes: dict[str, str]
+    ) -> dict[str, str]:
+        """
+        Extract variable-to-explicit-term bindings from WHERE patterns.
+        
+        This handles the case where a SELECT variable corresponds to an
+        explicit IRI in the WHERE clause pattern positions.
+        
+        Example: SELECT ?s ?p ?o WHERE { ?s <http://example.org/worksFor> ?o }
+        Returns: {"p": "http://example.org/worksFor"}
+        
+        Args:
+            where: The WHERE clause to analyze
+            prefixes: Prefix mappings for resolving prefixed IRIs
+            
+        Returns:
+            Dict mapping variable names to their explicit IRI values
+        """
+        bindings = {}
+        
+        # Standard variable names for triple positions
+        position_vars = {"s": "subject", "p": "predicate", "o": "object"}
+        
+        for pattern in where.patterns:
+            if isinstance(pattern, TriplePattern):
+                # Check each position for explicit terms
+                for var_name, position in [("s", pattern.subject), 
+                                            ("p", pattern.predicate), 
+                                            ("o", pattern.object)]:
+                    if isinstance(position, IRI):
+                        # This position has an explicit IRI
+                        resolved = self._resolve_term(position, prefixes)
+                        bindings[var_name] = resolved
+                    elif isinstance(position, Literal):
+                        bindings[var_name] = str(position.value)
+        
+        return bindings
+    
     def _find_independent_groups(
         self, patterns: list[tuple[int, TriplePattern, Any]]
     ) -> list[list[tuple[int, TriplePattern, Any]]]:
@@ -260,7 +301,11 @@ class SPARQLExecutor:
                 # Join patterns that share variables
                 shared_cols = set(result_df.columns) & set(pattern_df.columns)
                 shared_cols -= {"_pattern_idx"}
-                shared_cols = {c for c in shared_cols if not c.startswith("_prov_")}
+                # Exclude internal columns from join keys:
+                # - _prov_* columns are provenance metadata
+                # - *_value columns are typed object values (can have nulls that break joins)
+                shared_cols = {c for c in shared_cols 
+                               if not c.startswith("_prov_") and not c.endswith("_value")}
                 
                 if shared_cols:
                     result_df = result_df.join(pattern_df, on=list(shared_cols), how="inner")
@@ -318,6 +363,185 @@ class SPARQLExecutor:
         else:
             raise NotImplementedError(f"Query type {type(query)} not yet supported")
     
+    def explain(self, query: Query) -> "ExplainPlan":
+        """
+        Generate an execution plan for a query without executing it.
+        
+        Args:
+            query: Parsed Query AST
+            
+        Returns:
+            ExplainPlan object with query plan details
+        """
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        if isinstance(query, SelectQuery):
+            return self._explain_select(query)
+        elif isinstance(query, AskQuery):
+            return self._explain_ask(query)
+        elif isinstance(query, (ConstructQuery, DescribeQuery)):
+            return self._explain_construct_or_describe(query)
+        else:
+            return ExplainPlan(
+                query_type=type(query).__name__,
+                patterns=[],
+                estimated_cost=0.0,
+            )
+    
+    def _explain_select(self, query: SelectQuery) -> "ExplainPlan":
+        """Generate execution plan for SELECT query."""
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        patterns = []
+        filters = []
+        joins = []
+        total_cost = 0.0
+        total_facts = len(self.store._df)
+        
+        # Analyze WHERE clause patterns
+        if query.where:
+            for i, pattern in enumerate(query.where.patterns):
+                pattern_info = self._analyze_pattern(pattern, query.prefixes, i, total_facts)
+                patterns.append(pattern_info)
+                total_cost += pattern_info.get("estimated_rows", 0)
+                
+                if i > 0:
+                    joins.append({
+                        "type": "inner",
+                        "columns": pattern_info.get("join_columns", []),
+                        "pattern_idx": i,
+                    })
+            
+            # Analyze OPTIONAL patterns
+            for opt in query.where.optional_patterns:
+                for j, opt_pattern in enumerate(opt.patterns):
+                    pattern_info = self._analyze_pattern(opt_pattern, query.prefixes, len(patterns), total_facts)
+                    pattern_info["optional"] = True
+                    patterns.append(pattern_info)
+                    joins.append({
+                        "type": "left_outer",
+                        "columns": pattern_info.get("join_columns", []),
+                        "pattern_idx": len(patterns) - 1,
+                    })
+            
+            # Analyze FILTER clauses
+            for f in query.where.filters:
+                if isinstance(f, Filter):
+                    filters.append(str(f.expression))
+        
+        # Analyze ORDER BY
+        order_by = []
+        if query.order_by:
+            for var, asc in query.order_by:
+                order_by.append(f"{var.name} {'ASC' if asc else 'DESC'}")
+        
+        return ExplainPlan(
+            query_type="SELECT",
+            patterns=patterns,
+            filters=filters,
+            joins=joins,
+            order_by=order_by,
+            limit=query.limit,
+            offset=query.offset,
+            distinct=query.distinct,
+            estimated_cost=total_cost,
+        )
+    
+    def _explain_ask(self, query: AskQuery) -> "ExplainPlan":
+        """Generate execution plan for ASK query."""
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        patterns = []
+        total_facts = len(self.store._df)
+        
+        if query.where:
+            for i, pattern in enumerate(query.where.patterns):
+                patterns.append(self._analyze_pattern(pattern, query.prefixes, i, total_facts))
+        
+        return ExplainPlan(
+            query_type="ASK",
+            patterns=patterns,
+            limit=1,
+            estimated_cost=sum(p.get("estimated_rows", 0) for p in patterns),
+        )
+    
+    def _explain_construct_or_describe(self, query: Query) -> "ExplainPlan":
+        """Generate execution plan for CONSTRUCT or DESCRIBE query."""
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        patterns = []
+        total_facts = len(self.store._df)
+        
+        if hasattr(query, 'where') and query.where:
+            for i, pattern in enumerate(query.where.patterns):
+                patterns.append(self._analyze_pattern(pattern, query.prefixes, i, total_facts))
+        
+        return ExplainPlan(
+            query_type=type(query).__name__.replace("Query", "").upper(),
+            patterns=patterns,
+            estimated_cost=sum(p.get("estimated_rows", 0) for p in patterns),
+        )
+    
+    def _analyze_pattern(
+        self,
+        pattern: TriplePattern,
+        prefixes: dict[str, str],
+        pattern_idx: int,
+        total_facts: int
+    ) -> dict:
+        """Analyze a triple pattern for EXPLAIN output."""
+        # Build description
+        s_str = pattern.subject.name if isinstance(pattern.subject, Variable) else str(pattern.subject)
+        p_str = pattern.predicate.name if isinstance(pattern.predicate, Variable) else str(pattern.predicate)
+        o_str = pattern.object.name if isinstance(pattern.object, Variable) else str(pattern.object)
+        
+        # Handle IRI with prefixes
+        if isinstance(pattern.subject, IRI):
+            s_str = self._compact_iri(pattern.subject, prefixes)
+        if isinstance(pattern.predicate, IRI):
+            p_str = self._compact_iri(pattern.predicate, prefixes)
+        if isinstance(pattern.object, IRI):
+            o_str = self._compact_iri(pattern.object, prefixes)
+        
+        description = f"?{s_str} {p_str} ?{o_str}" if isinstance(pattern.subject, Variable) else f"{s_str} {p_str} {o_str}"
+        
+        # Estimate selectivity
+        selectivity = 1.0
+        join_columns = []
+        
+        if not isinstance(pattern.subject, Variable):
+            selectivity *= 0.001
+        else:
+            join_columns.append(pattern.subject.name)
+        
+        if not isinstance(pattern.predicate, Variable):
+            selectivity *= 0.1
+        else:
+            join_columns.append(pattern.predicate.name)
+        
+        if not isinstance(pattern.object, Variable):
+            selectivity *= 0.01
+        else:
+            join_columns.append(pattern.object.name)
+        
+        estimated_rows = max(1, int(total_facts * selectivity))
+        
+        return {
+            "type": "TriplePattern",
+            "description": description,
+            "selectivity": selectivity,
+            "estimated_rows": estimated_rows,
+            "join_columns": join_columns,
+            "pattern_idx": pattern_idx,
+        }
+    
+    def _compact_iri(self, iri: IRI, prefixes: dict[str, str]) -> str:
+        """Compact an IRI using prefixes if possible."""
+        for prefix, ns in prefixes.items():
+            if iri.value.startswith(ns):
+                return f"{prefix}:{iri.value[len(ns):]}"
+        return f"<{iri.value}>"
+
     def _execute_select(self, query: SelectQuery) -> pl.DataFrame:
         """Execute a SELECT query."""
         # Handle FROM clause - restrict to specified graphs
@@ -396,6 +620,19 @@ class SPARQLExecutor:
             df = df.slice(query.offset, query.limit or len(df))
         elif query.limit:
             df = df.head(query.limit)
+        
+        # Handle unbound SELECT variables that correspond to explicit terms in WHERE
+        # Example: SELECT ?s ?p ?o WHERE { ?s <http://example.org/worksFor> ?o }
+        # Here ?p is in SELECT but bound to explicit IRI in WHERE - fill it with that value
+        if not query.is_select_all() and len(df) > 0:
+            explicit_bindings = self._extract_explicit_bindings(query.where, query.prefixes)
+            for v in query.variables:
+                if isinstance(v, Variable) and v.name not in df.columns:
+                    if v.name in explicit_bindings:
+                        # Add column with the explicit value
+                        df = df.with_columns(
+                            pl.lit(explicit_bindings[v.name]).alias(v.name)
+                        )
         
         # Select only requested variables (or all if SELECT *)
         if not query.is_select_all():
@@ -799,8 +1036,11 @@ class SPARQLExecutor:
                 # Find shared variables to join on
                 shared_cols = set(result_df.columns) & set(pattern_df.columns)
                 shared_cols -= {"_pattern_idx"}  # Don't join on internal columns
-                # Also exclude provenance internal columns from join keys
-                shared_cols = {c for c in shared_cols if not c.startswith("_prov_")}
+                # Exclude internal columns from join keys:
+                # - _prov_* columns are provenance metadata
+                # - *_value columns are typed object values (can have nulls that break joins)
+                shared_cols = {c for c in shared_cols 
+                               if not c.startswith("_prov_") and not c.endswith("_value")}
                 
                 if shared_cols:
                     result_df = result_df.join(
@@ -822,7 +1062,9 @@ class SPARQLExecutor:
                     # Join with existing results
                     shared_cols = set(result_df.columns) & set(graph_df.columns)
                     shared_cols -= {"_pattern_idx"}
-                    shared_cols = {c for c in shared_cols if not c.startswith("_prov_")}
+                    # Exclude internal columns from join keys
+                    shared_cols = {c for c in shared_cols 
+                                   if not c.startswith("_prov_") and not c.endswith("_value")}
                     
                     if shared_cols:
                         result_df = result_df.join(graph_df, on=list(shared_cols), how="inner")
@@ -1119,7 +1361,9 @@ class SPARQLExecutor:
             else:
                 # Join on shared variables
                 shared_cols = set(result_df.columns) & set(pattern_df.columns)
-                shared_cols = {c for c in shared_cols if not c.startswith("_prov_")}
+                # Exclude internal columns from join keys
+                shared_cols = {c for c in shared_cols 
+                               if not c.startswith("_prov_") and not c.endswith("_value")}
                 if shared_cols:
                     result_df = result_df.join(pattern_df, on=list(shared_cols), how="inner")
                 else:

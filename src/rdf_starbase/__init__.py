@@ -54,4 +54,26 @@ __all__ = [
     # Repository Management
     "RepositoryManager",
     "RepositoryInfo",
+    # SQL Interface (optional - requires duckdb)
+    "DuckDBInterface",
+    "SQLQueryResult",
+    "create_sql_interface",
+    "check_duckdb_available",
 ]
+
+# Lazy import for optional DuckDB SQL interface
+def __getattr__(name):
+    if name in ("DuckDBInterface", "SQLQueryResult", "create_sql_interface", "check_duckdb_available"):
+        from rdf_starbase.storage.duckdb import (
+            DuckDBInterface,
+            SQLQueryResult,
+            create_sql_interface,
+            check_duckdb_available,
+        )
+        return {
+            "DuckDBInterface": DuckDBInterface,
+            "SQLQueryResult": SQLQueryResult,
+            "create_sql_interface": create_sql_interface,
+            "check_duckdb_available": check_duckdb_available,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

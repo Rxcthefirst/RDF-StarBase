@@ -806,6 +806,82 @@ class TripleStore:
             
             return store
     
+    def save_incremental(self, path: Path | str, force_compact: bool = False) -> dict:
+        """
+        Save the triple store incrementally.
+        
+        Only writes data that has changed since the last save, using delta files.
+        Automatically compacts when delta count exceeds threshold (default 10).
+        
+        Args:
+            path: Directory path for incremental storage
+            force_compact: Force full compaction (merge all deltas into base)
+            
+        Returns:
+            Dict with save statistics:
+            - status: "no_changes", "delta_saved", "compacted", or "full_save"
+            - delta_facts: Number of new facts written
+            - delta_terms: Number of new terms written
+            - was_compacted: Whether compaction occurred
+        """
+        from rdf_starbase.storage.persistence import IncrementalPersistence
+        
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        
+        persistence = IncrementalPersistence(path)
+        return persistence.save(
+            self._term_dict,
+            self._fact_store,
+            self._qt_dict,
+            force_full=force_compact
+        )
+    
+    @classmethod
+    def load_incremental(cls, path: Path | str) -> "TripleStore":
+        """
+        Load a triple store from incremental storage.
+        
+        Loads the base data and applies all delta files.
+        
+        Args:
+            path: Directory path containing incremental storage
+            
+        Returns:
+            Loaded TripleStore instance
+        """
+        from rdf_starbase.storage.persistence import IncrementalPersistence
+        
+        path = Path(path)
+        persistence = IncrementalPersistence(path)
+        
+        store = cls()
+        store._term_dict, store._fact_store, store._qt_dict = persistence.load()
+        store._init_common_terms()
+        return store
+    
+    def compact(self, path: Path | str) -> dict:
+        """
+        Force compaction of incremental storage.
+        
+        Merges all delta files into the base files.
+        
+        Args:
+            path: Directory path for incremental storage
+            
+        Returns:
+            Compaction statistics
+        """
+        from rdf_starbase.storage.persistence import IncrementalPersistence
+        
+        path = Path(path)
+        persistence = IncrementalPersistence(path)
+        return persistence.compact(
+            self._term_dict,
+            self._fact_store,
+            self._qt_dict
+        )
+
     def stats(self) -> dict[str, Any]:
         """Get statistics about the triple store."""
         fact_stats = self._fact_store.stats()

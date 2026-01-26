@@ -84,6 +84,200 @@ class StorageExecutor:
         else:
             raise NotImplementedError(f"Query type {type(query)} not yet supported")
     
+    def explain(self, query: Query) -> "ExplainPlan":
+        """
+        Generate an execution plan for a query without executing it.
+        
+        Args:
+            query: Parsed Query AST
+            
+        Returns:
+            ExplainPlan object with query plan details
+        """
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        # Determine query type
+        if isinstance(query, SelectQuery):
+            return self._explain_select(query)
+        elif isinstance(query, AskQuery):
+            return self._explain_ask(query)
+        elif isinstance(query, ConstructQuery):
+            return self._explain_construct(query)
+        elif isinstance(query, DescribeQuery):
+            return self._explain_describe(query)
+        else:
+            return ExplainPlan(
+                query_type=type(query).__name__,
+                patterns=[],
+                estimated_cost=0.0,
+            )
+    
+    def _explain_select(self, query: SelectQuery) -> "ExplainPlan":
+        """Generate execution plan for SELECT query."""
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        patterns = []
+        filters = []
+        joins = []
+        total_cost = 0.0
+        
+        # Analyze WHERE clause patterns
+        if query.where:
+            for i, pattern in enumerate(query.where.patterns):
+                pattern_info = self._analyze_pattern(pattern, query.prefixes, i)
+                patterns.append(pattern_info)
+                total_cost += pattern_info.get("estimated_rows", 0)
+                
+                # Each pattern after the first requires a join
+                if i > 0:
+                    joins.append({
+                        "type": "inner",
+                        "columns": pattern_info.get("join_columns", []),
+                        "pattern_idx": i,
+                    })
+            
+            # Analyze OPTIONAL patterns
+            for opt in query.where.optional_patterns:
+                for j, opt_pattern in enumerate(opt.patterns):
+                    pattern_info = self._analyze_pattern(opt_pattern, query.prefixes, len(patterns))
+                    pattern_info["optional"] = True
+                    patterns.append(pattern_info)
+                    joins.append({
+                        "type": "left_outer",
+                        "columns": pattern_info.get("join_columns", []),
+                        "pattern_idx": len(patterns) - 1,
+                    })
+            
+            # Analyze FILTER clauses
+            for f in query.where.filters:
+                if isinstance(f, Filter):
+                    filters.append(str(f.condition))
+        
+        # Analyze ORDER BY
+        order_by = []
+        if query.order_by:
+            for var, asc in query.order_by:
+                order_by.append(f"{var.name} {'ASC' if asc else 'DESC'}")
+        
+        return ExplainPlan(
+            query_type="SELECT",
+            patterns=patterns,
+            filters=filters,
+            joins=joins,
+            order_by=order_by,
+            limit=query.limit,
+            offset=query.offset,
+            distinct=query.distinct,
+            estimated_cost=total_cost,
+        )
+    
+    def _explain_ask(self, query: AskQuery) -> "ExplainPlan":
+        """Generate execution plan for ASK query."""
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        patterns = []
+        if query.where:
+            for i, pattern in enumerate(query.where.patterns):
+                patterns.append(self._analyze_pattern(pattern, query.prefixes, i))
+        
+        return ExplainPlan(
+            query_type="ASK",
+            patterns=patterns,
+            limit=1,  # ASK only needs one result
+            estimated_cost=sum(p.get("estimated_rows", 0) for p in patterns),
+        )
+    
+    def _explain_construct(self, query: ConstructQuery) -> "ExplainPlan":
+        """Generate execution plan for CONSTRUCT query."""
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        patterns = []
+        if query.where:
+            for i, pattern in enumerate(query.where.patterns):
+                patterns.append(self._analyze_pattern(pattern, query.prefixes, i))
+        
+        return ExplainPlan(
+            query_type="CONSTRUCT",
+            patterns=patterns,
+            estimated_cost=sum(p.get("estimated_rows", 0) for p in patterns),
+        )
+    
+    def _explain_describe(self, query: DescribeQuery) -> "ExplainPlan":
+        """Generate execution plan for DESCRIBE query."""
+        from rdf_starbase.storage.query_context import ExplainPlan
+        
+        patterns = []
+        if query.where:
+            for i, pattern in enumerate(query.where.patterns):
+                patterns.append(self._analyze_pattern(pattern, query.prefixes, i))
+        
+        return ExplainPlan(
+            query_type="DESCRIBE",
+            patterns=patterns,
+            estimated_cost=sum(p.get("estimated_rows", 0) for p in patterns),
+        )
+    
+    def _analyze_pattern(
+        self,
+        pattern: TriplePattern,
+        prefixes: dict[str, str],
+        pattern_idx: int
+    ) -> dict:
+        """
+        Analyze a triple pattern for EXPLAIN output.
+        
+        Returns pattern info with:
+        - type: Pattern type
+        - description: Human-readable pattern
+        - selectivity: Estimated selectivity (0-1)
+        - estimated_rows: Estimated result rows
+        - join_columns: Columns used for join with previous patterns
+        """
+        total_facts = len(self.fact_store._df)
+        
+        # Build description
+        s_str = pattern.subject.name if isinstance(pattern.subject, Variable) else str(pattern.subject)
+        p_str = pattern.predicate.name if isinstance(pattern.predicate, Variable) else str(pattern.predicate)
+        o_str = pattern.object.name if isinstance(pattern.object, Variable) else str(pattern.object)
+        
+        description = f"{s_str} {p_str} {o_str}"
+        
+        # Estimate selectivity based on bound vs variable positions
+        selectivity = 1.0
+        bound_positions = 0
+        join_columns = []
+        
+        if not isinstance(pattern.subject, Variable):
+            bound_positions += 1
+            selectivity *= 0.001  # Very selective on subject
+        else:
+            join_columns.append(pattern.subject.name)
+        
+        if not isinstance(pattern.predicate, Variable):
+            bound_positions += 1
+            selectivity *= 0.1  # Moderately selective on predicate
+        else:
+            join_columns.append(pattern.predicate.name)
+        
+        if not isinstance(pattern.object, Variable):
+            bound_positions += 1
+            selectivity *= 0.01  # Selective on object
+        else:
+            join_columns.append(pattern.object.name)
+        
+        # Estimate rows
+        estimated_rows = max(1, int(total_facts * selectivity))
+        
+        return {
+            "type": "TriplePattern" if not pattern.has_property_path() else "PropertyPath",
+            "description": description,
+            "selectivity": selectivity,
+            "estimated_rows": estimated_rows,
+            "bound_positions": bound_positions,
+            "join_columns": join_columns,
+            "pattern_idx": pattern_idx,
+        }
+
     def _execute_select(self, query: SelectQuery) -> pl.DataFrame:
         """Execute a SELECT query."""
         # Execute WHERE clause with integer IDs

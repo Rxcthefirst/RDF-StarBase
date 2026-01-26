@@ -21,6 +21,39 @@ from rdf_starbase.storage.persistence import (
     save_storage,
     load_storage,
 )
+from rdf_starbase.storage.duckdb import (
+    DuckDBInterface,
+    SQLQueryResult,
+    TableInfo,
+    create_sql_interface,
+    check_duckdb_available,
+)
+from rdf_starbase.storage.wal import (
+    WriteAheadLog,
+    WALEntry,
+    WALEntryType,
+    InsertPayload,
+    DeletePayload,
+    CheckpointState,
+)
+from rdf_starbase.storage.transactions import (
+    Transaction,
+    TransactionManager,
+    TransactionState,
+    IsolationLevel,
+)
+from rdf_starbase.storage.query_context import (
+    QueryContext,
+    QueryState,
+    QueryStats,
+    CancellationToken,
+    QueryCancelledException,
+    QueryTimeoutException,
+    ExplainPlan,
+    QueryExecutionManager,
+    execute_with_timeout,
+    query_timeout,
+)
 
 __all__ = [
     "TermKind",
@@ -41,4 +74,33 @@ __all__ = [
     "StoragePersistence",
     "save_storage",
     "load_storage",
+    # DuckDB SQL Interface
+    "DuckDBInterface",
+    "SQLQueryResult",
+    "TableInfo",
+    "create_sql_interface",
+    "check_duckdb_available",
+    # Write-Ahead Log
+    "WriteAheadLog",
+    "WALEntry",
+    "WALEntryType",
+    "InsertPayload",
+    "DeletePayload",
+    "CheckpointState",
+    # Transactions
+    "Transaction",
+    "TransactionManager",
+    "TransactionState",
+    "IsolationLevel",
+    # Query Context & Timeout
+    "QueryContext",
+    "QueryState",
+    "QueryStats",
+    "CancellationToken",
+    "QueryCancelledException",
+    "QueryTimeoutException",
+    "ExplainPlan",
+    "QueryExecutionManager",
+    "execute_with_timeout",
+    "query_timeout",
 ]

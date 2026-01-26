@@ -48,6 +48,22 @@ class SPARQLQueryRequest(BaseModel):
     query: str = Field(..., description="SPARQL-Star query string")
 
 
+class SQLQueryRequest(BaseModel):
+    """SQL query for a specific repository."""
+    sql: str = Field(..., description="SQL query string")
+    limit: Optional[int] = Field(None, description="Row limit (optional)")
+
+
+class SQLAggregateRequest(BaseModel):
+    """SQL aggregation request."""
+    group_by: str = Field(..., description="Column(s) to group by")
+    aggregations: dict = Field(..., description="Dict of output_name -> aggregation expression")
+    table: str = Field(default="triples", description="Table to query")
+    where: Optional[str] = Field(None, description="WHERE clause")
+    order_by: Optional[str] = Field(None, description="ORDER BY clause")
+    limit: Optional[int] = Field(None, description="LIMIT")
+
+
 class RepositoryResponse(BaseModel):
     """Response containing repository info."""
     name: str
@@ -524,6 +540,43 @@ def create_repository_router(
     # Import / Export
     # =========================================================================
     
+    def _resolve_graph_target(graph_target: Optional[str], filename: Optional[str] = None) -> Optional[str]:
+        """
+        Resolve graph_target parameter to a graph URI.
+        
+        Args:
+            graph_target: Graph target mode:
+                - None or 'default': Use default graph (returns None)
+                - 'named:<uri>': Use specified named graph URI
+                - 'auto': Auto-generate from filename
+            filename: Optional filename for 'auto' mode
+            
+        Returns:
+            Graph URI string or None for default graph
+        """
+        if graph_target is None or graph_target == "" or graph_target.lower() == "default":
+            return None
+        
+        if graph_target.lower() == "auto":
+            if filename:
+                # Generate graph URI from filename
+                # Remove extension and sanitize
+                base = filename.rsplit('.', 1)[0] if '.' in filename else filename
+                # Replace spaces and special chars
+                safe_name = base.replace(' ', '_').replace('\\', '/').split('/')[-1]
+                return f"http://rdf-starbase.io/graph/{safe_name}"
+            else:
+                # No filename, use timestamp-based graph
+                import time
+                return f"http://rdf-starbase.io/graph/import_{int(time.time())}"
+        
+        if graph_target.lower().startswith("named:"):
+            # Extract the URI after 'named:'
+            return graph_target[6:].strip()
+        
+        # Treat as direct URI
+        return graph_target
+
     @router.post("/{name}/import")
     async def import_data(name: str, request: dict):
         """Import RDF data in various formats.
@@ -540,6 +593,12 @@ def create_repository_router(
         - rdfjson: RDF/JSON (W3C format)
         - rdfxml: RDF/XML
         - binaryrdf: Binary RDF format
+        
+        Graph target options (graph_target parameter):
+        - 'default' or omit: Load into the default graph
+        - 'named:<uri>': Load into a specific named graph
+        - 'auto': Auto-generate graph name from source
+        - Direct URI: Use as named graph
         """
         try:
             store = manager.get_store(name)
@@ -548,6 +607,10 @@ def create_repository_router(
         
         data = request.get("data", "")
         format_type = request.get("format", "turtle").lower()
+        graph_target = request.get("graph_target", None)
+        
+        # Resolve graph target
+        target_graph = _resolve_graph_target(graph_target)
         
         # Handle data that might come as dict (shouldn't happen but defensive)
         if not isinstance(data, str):
@@ -594,6 +657,7 @@ def create_repository_router(
                     objects=objects,
                     source=source,
                     confidence=confidence,
+                    graph=target_graph,
                 )
             
             manager.save(name)
@@ -602,7 +666,8 @@ def create_repository_router(
                 "success": True,
                 "format": format_type,
                 "triples_added": count,
-                "message": f"Imported {count} triples from {format_type} data"
+                "graph": target_graph,
+                "message": f"Imported {count} triples from {format_type} data" + (f" into graph <{target_graph}>" if target_graph else " into default graph")
             }
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
@@ -611,7 +676,8 @@ def create_repository_router(
     async def upload_file(
         name: str,
         file: UploadFile = File(...),
-        format: str = Form(None, description="Format: turtle, ntriples, nquads, n3, trig, trix, jsonld, ndjsonld, rdfjson, rdfxml, binaryrdf (auto-detect from extension if not provided)")
+        format: str = Form(None, description="Format: turtle, ntriples, nquads, n3, trig, trix, jsonld, ndjsonld, rdfjson, rdfxml, binaryrdf (auto-detect from extension if not provided)"),
+        graph_target: str = Form(None, description="Graph target: 'default', 'named:<uri>', 'auto' (generate from filename), or direct URI")
     ):
         """
         Upload an RDF file directly for fast import.
@@ -620,6 +686,12 @@ def create_repository_router(
                              .ndjsonld, .ndjson, .rdfjson, .rdf, .xml, .brf
         
         Formats with RDF-Star support: turtle, ntriples, trig
+        
+        Graph target options:
+        - 'default' or omit: Load into the default graph
+        - 'named:<uri>': Load into a specific named graph
+        - 'auto': Auto-generate graph URI from filename
+        - Direct URI: Use as named graph
         """
         try:
             store = manager.get_store(name)
@@ -630,6 +702,9 @@ def create_repository_router(
         if not format:
             ext = file.filename.split('.')[-1].lower() if file.filename else ''
             format = FORMAT_EXTENSIONS.get(ext, 'turtle')
+        
+        # Resolve graph target (with filename for 'auto' mode)
+        target_graph = _resolve_graph_target(graph_target, file.filename)
         
         try:
             start_time = time.time()
@@ -684,6 +759,7 @@ def create_repository_router(
                     objects=objects,
                     source=source,
                     confidence=confidence,
+                    graph=target_graph,
                 )
             
             insert_time = time.time() - insert_start
@@ -699,13 +775,14 @@ def create_repository_router(
                 "filename": file.filename,
                 "format": format,
                 "triples_added": count,
+                "graph": target_graph,
                 "timing": {
                     "parse_seconds": round(parse_time, 3),
                     "insert_seconds": round(insert_time, 3),
                     "total_seconds": round(total_time, 3),
                     "triples_per_second": round(triples_per_sec, 0),
                 },
-                "message": f"Imported {count} triples in {total_time:.2f}s ({triples_per_sec:.0f} triples/sec)"
+                "message": f"Imported {count} triples in {total_time:.2f}s" + (f" into graph <{target_graph}>" if target_graph else "")
             }
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
@@ -780,6 +857,212 @@ def create_repository_router(
         }
     
     # =========================================================================
+    # SQL Interface (DuckDB)
+    # =========================================================================
+    
+    @router.get("/{name}/sql/status")
+    async def sql_status(name: str):
+        """Check if SQL interface is available for a repository."""
+        from rdf_starbase.storage.duckdb import check_duckdb_available
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        available = check_duckdb_available()
+        stats = store.stats()
+        
+        return {
+            "available": available,
+            "repository": name,
+            "message": "DuckDB SQL interface ready" if available else "Install duckdb: pip install duckdb",
+            "triple_count": stats.get("total_assertions", 0),
+            "tables": ["triples", "facts", "terms", "provenance", "named_graphs", "rdf_types"] if available else [],
+        }
+    
+    @router.post("/{name}/sql/query")
+    async def sql_query(name: str, request: SQLQueryRequest):
+        """
+        Execute a SQL query against the repository's triple store.
+        
+        Available tables:
+        - triples: Main triple data (subject, predicate, object, graph, source, confidence)
+        - facts: Raw integer-encoded facts (for advanced users)
+        - terms: Term dictionary (term_id, kind, lex)
+        - provenance: Filtered view of triples with provenance info
+        - named_graphs: List of distinct named graphs
+        - rdf_types: Subject-type pairs (filtered on rdf:type predicate)
+        
+        Example queries:
+        - SELECT * FROM triples LIMIT 10
+        - SELECT predicate, COUNT(*) as count FROM triples GROUP BY predicate ORDER BY count DESC
+        - SELECT subject, object FROM triples WHERE predicate LIKE '%type%'
+        """
+        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        
+        if not check_duckdb_available():
+            raise HTTPException(
+                status_code=501,
+                detail="DuckDB not installed. Install with: pip install duckdb"
+            )
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        try:
+            with DuckDBInterface(store, read_only=True) as sql:
+                result = sql.execute(request.sql, limit=request.limit)
+                return {
+                    "columns": result.columns,
+                    "rows": result.rows,
+                    "row_count": result.row_count,
+                    "execution_time_ms": result.execution_time_ms,
+                    "warnings": result.warnings,
+                }
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"SQL Error: {str(e)}")
+    
+    @router.get("/{name}/sql/tables")
+    async def sql_list_tables(name: str):
+        """List all available SQL tables and views."""
+        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        
+        if not check_duckdb_available():
+            raise HTTPException(
+                status_code=501,
+                detail="DuckDB not installed. Install with: pip install duckdb"
+            )
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        with DuckDBInterface(store, read_only=True) as sql:
+            tables = sql.list_tables()
+            return {
+                "tables": [
+                    {
+                        "name": t.name,
+                        "columns": t.columns,
+                        "row_count": t.row_count,
+                    }
+                    for t in tables
+                ]
+            }
+    
+    @router.get("/{name}/sql/schema/{table_name}")
+    async def sql_table_schema(name: str, table_name: str):
+        """Get the schema (column types) for a table."""
+        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        
+        if not check_duckdb_available():
+            raise HTTPException(
+                status_code=501,
+                detail="DuckDB not installed. Install with: pip install duckdb"
+            )
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        try:
+            with DuckDBInterface(store, read_only=True) as sql:
+                schema = sql.get_schema(table_name)
+                return {
+                    "table": table_name,
+                    "columns": schema,
+                }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    
+    @router.get("/{name}/sql/sample/{table_name}")
+    async def sql_sample_table(
+        name: str,
+        table_name: str,
+        n: int = Query(default=10, ge=1, le=1000),
+    ):
+        """Get a sample of rows from a table."""
+        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        
+        if not check_duckdb_available():
+            raise HTTPException(
+                status_code=501,
+                detail="DuckDB not installed. Install with: pip install duckdb"
+            )
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        try:
+            with DuckDBInterface(store, read_only=True) as sql:
+                result = sql.sample(table_name, n)
+                return {
+                    "table": table_name,
+                    "columns": result.columns,
+                    "rows": result.rows,
+                    "sample_size": result.row_count,
+                }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    
+    @router.post("/{name}/sql/aggregate")
+    async def sql_aggregate(name: str, request: SQLAggregateRequest):
+        """
+        Run an aggregation query.
+        
+        Example request:
+        {
+            "group_by": "predicate",
+            "aggregations": {
+                "count": "COUNT(*)",
+                "subjects": "COUNT(DISTINCT subject)"
+            },
+            "order_by": "count DESC",
+            "limit": 10
+        }
+        """
+        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        
+        if not check_duckdb_available():
+            raise HTTPException(
+                status_code=501,
+                detail="DuckDB not installed. Install with: pip install duckdb"
+            )
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        try:
+            with DuckDBInterface(store, read_only=True) as sql:
+                result = sql.aggregate(
+                    group_by=request.group_by,
+                    aggregations=request.aggregations,
+                    table=request.table,
+                    where=request.where,
+                    order_by=request.order_by,
+                    limit=request.limit,
+                )
+                return {
+                    "columns": result.columns,
+                    "rows": result.rows,
+                    "row_count": result.row_count,
+                    "execution_time_ms": result.execution_time_ms,
+                }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # =========================================================================
     # Example Datasets
     # =========================================================================
     
@@ -850,6 +1133,341 @@ def create_repository_router(
             }
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to load dataset: {str(e)}")
+    
+    # =========================================================================
+    # Repository AI Grounding Endpoints
+    # =========================================================================
+    
+    @router.get("/{name}/ai/health")
+    async def repository_ai_health(name: str):
+        """AI Grounding health check for a specific repository."""
+        try:
+            store = manager.get_store(name)
+            stats = store.stats()
+            return {
+                "status": "healthy",
+                "api": "ai_grounding",
+                "repository": name,
+                "version": "1.0.0",
+                "store_stats": {
+                    "total_triples": stats.get("total_assertions", 0),
+                    "unique_subjects": stats.get("unique_subjects", 0),
+                },
+                "capabilities": [
+                    "query",
+                    "verify",
+                    "context",
+                    "materialize",
+                    "inferences",
+                ],
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            return {"status": "degraded", "error": str(e)}
+    
+    @router.post("/{name}/ai/query")
+    async def repository_ai_query(name: str, request: dict):
+        """Query facts for AI grounding from a specific repository."""
+        from datetime import datetime, timedelta
+        import hashlib
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        retrieval_time = datetime.utcnow()
+        
+        # Parse confidence level
+        min_confidence_str = request.get("min_confidence", "any")
+        confidence_thresholds = {
+            "high": 0.9, "medium": 0.7, "low": 0.5, "any": 0.0
+        }
+        confidence_threshold = confidence_thresholds.get(
+            min_confidence_str, 
+            float(min_confidence_str) if isinstance(min_confidence_str, (int, float)) else 0.0
+        )
+        
+        # Get triples with filters
+        df = store.get_triples(
+            subject=request.get("subject"),
+            predicate=request.get("predicate"),
+            obj=request.get("object"),
+            min_confidence=confidence_threshold,
+        )
+        
+        total_count = len(df)
+        
+        # Apply source filter
+        sources = request.get("sources", [])
+        if sources:
+            df = df.filter(pl.col("source").is_in(sources))
+        
+        # Apply freshness filter
+        max_age_days = request.get("max_age_days")
+        if max_age_days:
+            cutoff = datetime.utcnow() - timedelta(days=max_age_days)
+            if "timestamp" in df.columns:
+                df = df.filter(pl.col("timestamp") >= cutoff)
+        
+        # Apply limit
+        limit = request.get("limit", 100)
+        df = df.head(limit)
+        
+        # Convert to grounded facts
+        facts = []
+        for row in df.iter_rows(named=True):
+            fact_hash = f"{row['subject']}|{row['predicate']}|{row['object']}|{row.get('source', 'unknown')}"
+            hash_id = hashlib.sha256(fact_hash.encode()).hexdigest()[:12]
+            
+            facts.append({
+                "subject": row["subject"],
+                "predicate": row["predicate"],
+                "object": row["object"],
+                "citation": {
+                    "fact_hash": hash_id,
+                    "source": row.get("source", "unknown"),
+                    "confidence": row.get("confidence", 1.0),
+                    "timestamp": row.get("timestamp", retrieval_time).isoformat() if hasattr(row.get("timestamp", retrieval_time), "isoformat") else str(row.get("timestamp", "")),
+                    "retrieval_time": retrieval_time.isoformat(),
+                },
+            })
+        
+        sources_used = df["source"].unique().to_list() if len(df) > 0 and "source" in df.columns else []
+        
+        return {
+            "facts": facts,
+            "total_count": total_count,
+            "filtered_count": len(facts),
+            "confidence_threshold": confidence_threshold,
+            "retrieval_timestamp": retrieval_time.isoformat(),
+            "sources_used": sources_used,
+            "repository": name,
+        }
+    
+    @router.post("/{name}/ai/verify")
+    async def repository_ai_verify(name: str, request: dict):
+        """Verify a claim against a specific repository's knowledge base."""
+        from datetime import datetime
+        import hashlib
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        retrieval_time = datetime.utcnow()
+        
+        subject = request.get("subject")
+        predicate = request.get("predicate")
+        expected_object = request.get("expected_object")
+        
+        min_confidence_str = request.get("min_confidence", "low")
+        confidence_thresholds = {"high": 0.9, "medium": 0.7, "low": 0.5, "any": 0.0}
+        confidence_threshold = confidence_thresholds.get(min_confidence_str, 0.5)
+        
+        # Get matching facts
+        df = store.get_triples(
+            subject=subject,
+            predicate=predicate,
+            min_confidence=confidence_threshold,
+        )
+        
+        def df_to_facts(df_subset):
+            facts = []
+            for row in df_subset.iter_rows(named=True):
+                fact_hash = f"{row['subject']}|{row['predicate']}|{row['object']}|{row.get('source', 'unknown')}"
+                hash_id = hashlib.sha256(fact_hash.encode()).hexdigest()[:12]
+                facts.append({
+                    "subject": row["subject"],
+                    "predicate": row["predicate"],
+                    "object": row["object"],
+                    "citation": {
+                        "fact_hash": hash_id,
+                        "source": row.get("source", "unknown"),
+                        "confidence": row.get("confidence", 1.0),
+                        "retrieval_time": retrieval_time.isoformat(),
+                    },
+                })
+            return facts
+        
+        if len(df) == 0:
+            return {
+                "claim_supported": False,
+                "confidence": None,
+                "supporting_facts": [],
+                "contradicting_facts": [],
+                "has_conflicts": False,
+                "recommendation": "No facts found for this subject-predicate pair.",
+                "repository": name,
+            }
+        
+        all_facts = df_to_facts(df)
+        
+        if expected_object:
+            supporting = [f for f in all_facts if str(f["object"]) == str(expected_object)]
+            contradicting = [f for f in all_facts if str(f["object"]) != str(expected_object)]
+            has_conflicts = len(supporting) > 0 and len(contradicting) > 0
+            best_confidence = max((f["citation"]["confidence"] for f in supporting), default=None)
+            
+            return {
+                "claim_supported": len(supporting) > 0,
+                "confidence": best_confidence,
+                "supporting_facts": supporting,
+                "contradicting_facts": contradicting,
+                "has_conflicts": has_conflicts,
+                "recommendation": f"Claim {'supported' if supporting else 'not supported'} by knowledge base.",
+                "repository": name,
+            }
+        else:
+            unique_values = len(set(str(f["object"]) for f in all_facts))
+            has_conflicts = unique_values > 1
+            best_confidence = max((f["citation"]["confidence"] for f in all_facts), default=None)
+            
+            return {
+                "claim_supported": True,
+                "confidence": best_confidence,
+                "supporting_facts": all_facts,
+                "contradicting_facts": [],
+                "has_conflicts": has_conflicts,
+                "recommendation": f"Found {len(all_facts)} fact(s) with {unique_values} unique value(s).",
+                "repository": name,
+            }
+    
+    @router.get("/{name}/ai/context/{iri:path}")
+    async def repository_ai_context(
+        name: str,
+        iri: str,
+        min_confidence: str = Query("low", description="Minimum confidence: high, medium, low, any"),
+        include_incoming: bool = Query(True, description="Include facts where entity is the object"),
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        """Get full context for an entity from a specific repository."""
+        from datetime import datetime
+        import urllib.parse
+        import hashlib
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        entity = urllib.parse.unquote(iri)
+        retrieval_time = datetime.utcnow()
+        
+        confidence_thresholds = {"high": 0.9, "medium": 0.7, "low": 0.5, "any": 0.0}
+        confidence_threshold = confidence_thresholds.get(min_confidence, 0.5)
+        
+        # Get outgoing facts
+        df_out = store.get_triples(subject=entity, min_confidence=confidence_threshold)
+        
+        # Get incoming facts if requested
+        if include_incoming:
+            df_in = store.get_triples(obj=entity, min_confidence=confidence_threshold)
+            df = pl.concat([df_out, df_in]).unique()
+        else:
+            df = df_out
+        
+        df = df.head(limit)
+        
+        # Convert to facts
+        facts = []
+        related = set()
+        for row in df.iter_rows(named=True):
+            fact_hash = f"{row['subject']}|{row['predicate']}|{row['object']}|{row.get('source', 'unknown')}"
+            hash_id = hashlib.sha256(fact_hash.encode()).hexdigest()[:12]
+            
+            facts.append({
+                "subject": row["subject"],
+                "predicate": row["predicate"],
+                "object": row["object"],
+                "citation": {
+                    "fact_hash": hash_id,
+                    "source": row.get("source", "unknown"),
+                    "confidence": row.get("confidence", 1.0),
+                    "retrieval_time": retrieval_time.isoformat(),
+                },
+            })
+            
+            # Track related entities
+            if row["subject"] != entity and row["subject"].startswith("http"):
+                related.add(row["subject"])
+            obj_str = str(row["object"])
+            if obj_str != entity and obj_str.startswith("http"):
+                related.add(obj_str)
+        
+        # Source and confidence summaries
+        sources = list(set(f["citation"]["source"] for f in facts))
+        confidences = [f["citation"]["confidence"] for f in facts]
+        
+        return {
+            "entity": entity,
+            "facts": facts,
+            "related_entities": list(related)[:20],
+            "sources": sources,
+            "confidence_summary": {
+                "min": min(confidences) if confidences else 0,
+                "max": max(confidences) if confidences else 0,
+                "avg": sum(confidences) / len(confidences) if confidences else 0,
+            },
+            "retrieval_timestamp": retrieval_time.isoformat(),
+            "repository": name,
+        }
+    
+    @router.get("/{name}/ai/inferences")
+    async def repository_ai_inferences(
+        name: str,
+        limit: int = Query(100, ge=1, le=1000),
+    ):
+        """List materialized inferences from a specific repository."""
+        from datetime import datetime
+        import hashlib
+        
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        retrieval_time = datetime.utcnow()
+        df = store.get_triples()
+        
+        # Filter for inferred triples
+        if "process" in df.columns:
+            df = df.filter(
+                (pl.col("process") == "reasoner") |
+                (pl.col("process") == "inference_engine") |
+                (pl.col("source") == "reasoner")
+            )
+        elif "source" in df.columns:
+            df = df.filter(pl.col("source") == "reasoner")
+        else:
+            return {"count": 0, "inferences": [], "repository": name}
+        
+        df = df.head(limit)
+        
+        inferences = []
+        for row in df.iter_rows(named=True):
+            fact_hash = f"{row['subject']}|{row['predicate']}|{row['object']}|reasoner"
+            hash_id = hashlib.sha256(fact_hash.encode()).hexdigest()[:12]
+            inferences.append({
+                "subject": row["subject"],
+                "predicate": row["predicate"],
+                "object": row["object"],
+                "citation": {
+                    "fact_hash": hash_id,
+                    "source": "reasoner",
+                    "confidence": 1.0,
+                    "retrieval_time": retrieval_time.isoformat(),
+                },
+            })
+        
+        return {
+            "count": len(inferences),
+            "inferences": inferences,
+            "retrieval_timestamp": retrieval_time.isoformat(),
+            "repository": name,
+        }
     
     return router, manager
 
