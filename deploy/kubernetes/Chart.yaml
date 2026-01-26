@@ -1,0 +1,26 @@
+apiVersion: v2
+name: rdfstarbase
+description: A Helm chart for RDF-StarBase - High-performance RDF-Star knowledge graph database
+
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+keywords:
+  - rdf
+  - rdf-star
+  - knowledge-graph
+  - sparql
+  - semantic-web
+  - database
+  - ai-grounding
+
+home: https://github.com/ontus/rdf-starbase
+sources:
+  - https://github.com/ontus/rdf-starbase
+
+maintainers:
+  - name: Ontus Team
+    email: team@ontus.dev
+
+dependencies: []

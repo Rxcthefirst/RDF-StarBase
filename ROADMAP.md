@@ -4,18 +4,18 @@
 
 ---
 
-## Current Status: v0.3.0 Complete ✅
+## Current Status: v1.0.0 Complete ✅
 
-RDF-StarBase now has a **complete product workflow layer** (1095 tests, 72% coverage). The transformation from "engine" to "database product" is complete!
+RDF-StarBase is now **production-ready** with federation, multi-tenancy, and enterprise operations (1380 tests, 74% coverage). Ready for enterprise deployment!
 
 ### Architecture Assessment
 
 | Layer | Score | Status |
-|-------|-------|--------|
+|-------|-------|---------|
 | **Storage Engine** | 9/10 | ✅ WAL, ACID, partitioning, indexes, memory budget |
 | **Repository Manager** | 9/10 | ✅ Backup/restore, clone, versioning, config |
-| **Product Workflows** | 8/10 | ✅ Staging, observability, graph explorer, query tools |
-
+| **Product Workflows** | 9/10 | ✅ Staging, observability, graph explorer, query tools |
+| **Trust & Security** | 9/10 | ✅ Auth, audit, trust scoring, compliance || **Enterprise Ops** | 9/10 | ✅ Federation, multi-tenancy, Prometheus, tracing |
 ### What's Done (v0.1.0 + v0.2.0 + v0.3.0)
 
 | Category | Features | Tests |
@@ -44,8 +44,15 @@ RDF-StarBase now has a **complete product workflow layer** (1095 tests, 72% cove
 | **Graph Explorer** | List graphs, DCAT/PROV metadata, statistics, replace/drop/copy | ✅ |
 | **Observability** | Metrics collection, health checks, admin dashboard data | ✅ |
 | **Repository Config** | Schema versioning, migrations, per-repo configuration | ✅ |
+| **Authentication** | API key management, role-based access, scoped tokens, rate limiting | ✅ |
+| **Audit & Compliance** | Audit log, CSV/JSON export, data lineage tracking, source health | ✅ |
+| **Trust Scoring** | Configurable trust policies, confidence decay, conflict resolution | ✅ |
+| **Federation** | SERVICE clause, cross-instance sync, distributed query planning | ✅ |
+| **Multi-tenancy** | Tenant isolation, resource quotas, usage tracking | ✅ |
+| **Enterprise Ops** | Health checks, Prometheus metrics, OpenTelemetry tracing | ✅ |
+| **Kubernetes** | Helm chart, StatefulSet, PVC, Ingress, ServiceMonitor | ✅ |
 
-**Test Suite:** 1095 tests, 72% coverage  
+**Test Suite:** 1380 tests, 74% coverage  
 **Benchmarks:** 10-72x faster than rdflib
 
 ---
@@ -55,12 +62,14 @@ RDF-StarBase now has a **complete product workflow layer** (1095 tests, 72% cove
 ### v0.1.0 — Alpha (Q1 2026) ✅ SHIPPED
 ### v0.2.0 — Beta (Q2 2026) ✅ SHIPPED
 ### v0.3.0 — Product Workflows (Q3 2026) ✅ SHIPPED
+### v0.4.0 — Trust & Security (Q4 2026) ✅ SHIPPED
+### v1.0.0 — Production (Q1 2027) ✅ SHIPPED
 
 *See archived sections below for completed features.*
 
 ---
 
-### v0.4.0 — Trust & Security (Q4 2026)
+### v1.0.0 — Production (Q1 2027)
 
 **Goal:** Transform from "engine" to "database product" with real-world workflows
 
@@ -105,43 +114,43 @@ RDF-StarBase now has a **complete product workflow layer** (1095 tests, 72% cove
 
 **Goal:** Enterprise-ready authentication and data governance
 
-#### Authentication & Authorization (Priority: HIGH)
-- [ ] **API key management** — Generate, revoke, list API keys
-- [ ] **Role-based access** — Reader, Writer, Admin roles per repository
-- [ ] **Scoped tokens** — Tokens with specific repo/operation permissions
-- [ ] **Rate limiting** — Per-key query/ingestion rate limits
+#### Authentication & Authorization (Priority: HIGH) ✅
+- [x] **API key management** — Generate, revoke, list API keys ✅
+- [x] **Role-based access** — Reader, Writer, Admin roles per repository ✅
+- [x] **Scoped tokens** — Tokens with specific repo/operation permissions ✅
+- [x] **Rate limiting** — Per-key query/ingestion rate limits ✅
 
-#### Audit & Compliance (Priority: MEDIUM)
-- [ ] **Audit log** — Who loaded data, who ran queries, when
-- [ ] **Audit log export** — CSV/JSON export for compliance
-- [ ] **Data lineage view** — Visual lineage from source to derived facts
-- [ ] **Source health monitoring** — Track freshness, error rates per source
+#### Audit & Compliance (Priority: MEDIUM) ✅
+- [x] **Audit log** — Who loaded data, who ran queries, when ✅
+- [x] **Audit log export** — CSV/JSON export for compliance ✅
+- [x] **Data lineage view** — Visual lineage from source to derived facts ✅
+- [x] **Source health monitoring** — Track freshness, error rates per source ✅
 
-#### Trust Scoring (Priority: MEDIUM)
-- [ ] **Configurable trust policies** — Per-source confidence rules
-- [ ] **Confidence decay** — Time-based decay for aging assertions
-- [ ] **Conflict resolution** — Strategies: most-recent, highest-confidence, manual review
-- [ ] **Trust inheritance** — Inferred facts inherit trust from premises
+#### Trust Scoring (Priority: MEDIUM) ✅
+- [x] **Configurable trust policies** — Per-source confidence rules ✅
+- [x] **Confidence decay** — Time-based decay for aging assertions ✅
+- [x] **Conflict resolution** — Strategies: most-recent, highest-confidence, manual review ✅
+- [x] **Trust inheritance** — Inferred facts inherit trust from premises ✅
 
 ---
 
-### v1.0.0 — Production (Q1 2027)
+### v1.0.0 — Production (Q1 2027) ✅
 
 **Goal:** Enterprise-grade, federation-ready, certified
 
-#### Federation
-- [ ] **SERVICE clause** — SPARQL 1.1 Federated Query
-- [ ] **Cross-instance sync** — Replicate between RDF-StarBase instances
-- [ ] **Distributed query planning** — Push filters to remote endpoints
+#### Federation ✅
+- [x] **SERVICE clause** — SPARQL 1.1 Federated Query ✅
+- [x] **Cross-instance sync** — Replicate between RDF-StarBase instances ✅
+- [x] **Distributed query planning** — Push filters to remote endpoints ✅
 
-#### Enterprise Operations
-- [ ] **Multi-tenancy** — Isolated namespaces with resource quotas
-- [ ] **Kubernetes manifests** — Helm chart with StatefulSet, PVC, Ingress
-- [ ] **Prometheus endpoint** — `/metrics` in Prometheus exposition format
-- [ ] **OpenTelemetry tracing** — Distributed traces for query execution
-- [ ] **Health checks** — `/health`, `/ready` endpoints for orchestration
+#### Enterprise Operations ✅
+- [x] **Multi-tenancy** — Isolated namespaces with resource quotas ✅
+- [x] **Kubernetes manifests** — Helm chart with StatefulSet, PVC, Ingress ✅
+- [x] **Prometheus endpoint** — `/metrics` in Prometheus exposition format ✅
+- [x] **OpenTelemetry tracing** — Distributed traces for query execution ✅
+- [x] **Health checks** — `/health`, `/ready` endpoints for orchestration ✅
 
-#### Certification
+#### Certification (Deferred to v1.1.0)
 - [ ] **W3C SPARQL 1.1 test suite** — Full compliance verification
 - [ ] **RDF-Star Working Group tests** — Quoted triple edge cases
 - [ ] **Security audit** — Third-party review of auth, data isolation

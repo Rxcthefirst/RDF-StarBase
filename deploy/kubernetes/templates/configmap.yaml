@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rdfstarbase.fullname" . }}-config
+  labels:
+    {{- include "rdfstarbase.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # RDF-StarBase Configuration
+    server:
+      host: 0.0.0.0
+      port: {{ .Values.service.port }}
+      cors_origins: {{ .Values.config.corsOrigins | quote }}
+    
+    storage:
+      data_dir: /data
+      wal_enabled: {{ .Values.config.walEnabled }}
+      wal_flush_interval_ms: {{ .Values.config.walFlushInterval }}
+      compaction_enabled: {{ .Values.config.compactionEnabled }}
+      compaction_threshold: {{ .Values.config.compactionThreshold }}
+    
+    query:
+      timeout_seconds: {{ .Values.config.queryTimeout }}
+      max_memory_bytes: {{ .Values.config.maxMemory }}
+    
+    reasoning:
+      enabled: {{ .Values.config.reasoningEnabled }}
+    
+    logging:
+      level: {{ .Values.config.logLevel }}
+      format: json
+    
+    {{- if .Values.config.rateLimitEnabled }}
+    rate_limiting:
+      enabled: true
+      queries_per_minute: {{ .Values.config.rateLimitQueriesPerMinute }}
+    {{- end }}
+    
+    {{- if .Values.multiTenancy.enabled }}
+    multi_tenancy:
+      enabled: true
+      default_quotas:
+        repositories: {{ .Values.multiTenancy.defaultQuotas.repositories }}
+        triples_per_repo: {{ .Values.multiTenancy.defaultQuotas.triplesPerRepo }}
+        storage_bytes: {{ .Values.multiTenancy.defaultQuotas.storageBytes }}
+        queries_per_minute: {{ .Values.multiTenancy.defaultQuotas.queriesPerMinute }}
+    {{- end }}
+    
+    {{- if .Values.federation.enabled }}
+    federation:
+      enabled: true
+      endpoints:
+        {{- range .Values.federation.endpoints }}
+        - url: {{ .url | quote }}
+          name: {{ .name | quote }}
+          {{- if .authToken }}
+          auth_token: {{ .authToken | quote }}
+          {{- end }}
+        {{- end }}
+    {{- end }}
+    
+    {{- if .Values.metrics.enabled }}
+    metrics:
+      enabled: true
+      port: {{ .Values.metrics.port }}
+      path: {{ .Values.metrics.path }}
+    {{- end }}
