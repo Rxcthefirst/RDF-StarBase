@@ -146,7 +146,7 @@ export default function SchemaBrowser({ repositoryName, onInsert, theme }) {
           {/* Classes Section */}
           <div className="schema-section">
             <div 
-              className="section-header" 
+              className="schema-section-header" 
               onClick={() => toggleSection('classes')}
             >
               {expandedSections.classes ? <ChevronDownIcon size={16} /> : <ChevronRightIcon size={16} />}
@@ -177,7 +177,7 @@ export default function SchemaBrowser({ repositoryName, onInsert, theme }) {
           {/* Properties Section */}
           <div className="schema-section">
             <div 
-              className="section-header" 
+              className="schema-section-header" 
               onClick={() => toggleSection('properties')}
             >
               {expandedSections.properties ? <ChevronDownIcon size={16} /> : <ChevronRightIcon size={16} />}
@@ -229,7 +229,7 @@ export default function SchemaBrowser({ repositoryName, onInsert, theme }) {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          padding: 0.75rem 1rem;
+          padding: 0.5rem 0.75rem;
           border-bottom: 1px solid var(--border-color);
         }
         
@@ -260,11 +260,11 @@ export default function SchemaBrowser({ repositoryName, onInsert, theme }) {
         }
         
         .schema-search {
-          margin: 0.5rem;
-          padding: 0.5rem 0.75rem;
+          margin: 0.4rem 0.5rem;
+          padding: 0.4rem 0.6rem;
           border: 1px solid var(--border-color);
           border-radius: 4px;
-          font-size: 0.85rem;
+          font-size: 0.8rem;
           background: var(--input-bg);
           color: inherit;
         }
@@ -297,38 +297,40 @@ export default function SchemaBrowser({ repositoryName, onInsert, theme }) {
         
         .schema-section {
           border-bottom: 1px solid var(--border-color);
+          margin: 0;
         }
         
-        .section-header {
+        .schema-section-header {
           display: flex;
           align-items: center;
-          gap: 0.5rem;
-          padding: 0.5rem 0.75rem;
+          gap: 0.4rem;
+          padding: 0.4rem 0.6rem;
           cursor: pointer;
-          font-size: 0.85rem;
+          font-size: 0.8rem;
           font-weight: 500;
           user-select: none;
         }
         
-        .schema-browser.dark .section-header:hover {
+        .schema-browser.dark .schema-section-header:hover {
           background: #313244;
         }
         
-        .schema-browser.light .section-header:hover {
+        .schema-browser.light .schema-section-header:hover {
           background: #e9ecef;
         }
         
         .section-content {
-          max-height: 300px;
+          max-height: 280px;
           overflow-y: auto;
+          padding: 0;
         }
         
         .schema-item {
           display: flex;
           align-items: center;
-          justify-content: space-between;
-          padding: 0.4rem 1rem 0.4rem 2rem;
-          font-size: 0.8rem;
+          gap: 0.5rem;
+          padding: 0.25rem 0.6rem 0.25rem 1.5rem;
+          font-size: 0.78rem;
           cursor: pointer;
           transition: background 0.15s;
         }
@@ -342,17 +344,17 @@ export default function SchemaBrowser({ repositoryName, onInsert, theme }) {
         }
         
         .item-label {
-          flex: 1;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+          max-width: 200px;
         }
         
         .item-count {
           font-size: 0.75rem;
           padding: 0.1rem 0.4rem;
           border-radius: 10px;
-          margin-left: 0.5rem;
+          flex-shrink: 0;
         }
         
         .schema-browser.dark .item-count {

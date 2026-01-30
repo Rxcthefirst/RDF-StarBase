@@ -339,8 +339,8 @@ class TurtleParser:
             if self.pos < len(self.text) and self.text[self.pos] == ';':
                 self.pos += 1
                 self._skip_ws_and_comments()
-                # Check for trailing semicolon before period
-                if self.pos < len(self.text) and self.text[self.pos] in '.]:':
+                # Check for trailing semicolon before period or end bracket
+                if self.pos < len(self.text) and self.text[self.pos] in '.]':
                     break
                 continue
             else:
@@ -676,8 +676,13 @@ class TurtleParser:
             if c.isdigit():
                 self.pos += 1
             elif c == '.' and not has_decimal:
-                has_decimal = True
-                self.pos += 1
+                # Only treat as decimal if followed by digit
+                # Otherwise it's a statement terminator
+                if self.pos + 1 < len(self.text) and self.text[self.pos + 1].isdigit():
+                    has_decimal = True
+                    self.pos += 1
+                else:
+                    break
             elif c in 'eE' and not has_exponent:
                 has_exponent = True
                 self.pos += 1

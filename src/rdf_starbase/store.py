@@ -270,8 +270,8 @@ class TripleStore:
             .alias("object_value"),
             # Deprecated flag
             ((pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)) != 0).alias("deprecated"),
-            # Timestamp
-            (pl.col("t_added") * 1000).cast(pl.Datetime("ns", "UTC")).alias("timestamp"),
+            # Timestamp - use microseconds to match _create_empty_dataframe schema
+            pl.col("t_added").cast(pl.Datetime("us", "UTC")).alias("timestamp"),
         ])
         
         # Collect and finalize
@@ -405,6 +405,248 @@ class TripleStore:
         
         return lf
     
+    def get_triples_optimized(
+        self,
+        subject: Optional[str] = None,
+        predicate: Optional[str] = None,
+        obj: Optional[str] = None,
+        graph: Optional[str] = None,
+        source: Optional[str] = None,
+        min_confidence: float = 0.0,
+        include_deprecated: bool = False,
+        limit: Optional[int] = None,
+    ) -> pl.DataFrame:
+        """
+        Query triples using filter pushdown to integer storage.
+        
+        This is MUCH faster than get_triples() for filtered queries because:
+        1. Filters are pushed down to the integer-based FactStore
+        2. Only matching rows are materialized to strings
+        3. No full DataFrame cache rebuild required
+        
+        Use this for:
+        - AI grounding queries (entity context, verification)
+        - Single-entity lookups
+        - Any query with specific subject/predicate/object filters
+        
+        Args:
+            subject: Filter by subject IRI
+            predicate: Filter by predicate IRI
+            obj: Filter by object value
+            graph: Filter by graph IRI
+            source: Filter by source (applied post-materialization)
+            min_confidence: Minimum confidence threshold
+            include_deprecated: Include soft-deleted facts
+            limit: Maximum rows to return
+            
+        Returns:
+            DataFrame with string columns (subject, predicate, object, etc.)
+        """
+        # Resolve string filters to TermIds for filter pushdown
+        s_id = None
+        p_id = None
+        o_id = None
+        g_id = None
+        
+        if subject is not None:
+            s_id = self._term_dict.lookup_iri(subject)
+            if s_id is None:
+                # Subject doesn't exist in store - return empty
+                return self._create_empty_dataframe()
+        
+        if predicate is not None:
+            p_id = self._term_dict.lookup_iri(predicate)
+            if p_id is None:
+                return self._create_empty_dataframe()
+        
+        if obj is not None:
+            # Try as IRI first, then literal
+            o_id = self._term_dict.lookup_iri(str(obj))
+            if o_id is None:
+                o_id = self._term_dict.lookup_literal(str(obj))
+            if o_id is None:
+                return self._create_empty_dataframe()
+        
+        if graph is not None:
+            g_id = self._term_dict.lookup_iri(graph)
+            if g_id is None:
+                return self._create_empty_dataframe()
+        
+        # Filter at integer level
+        lf = self.filter_facts_by_ids(
+            s_id=s_id,
+            p_id=p_id,
+            o_id=o_id,
+            g_id=g_id,
+            include_deprecated=include_deprecated,
+        )
+        
+        # Apply confidence filter at integer level
+        if min_confidence > 0.0:
+            lf = lf.filter(pl.col("confidence") >= min_confidence)
+        
+        # Apply limit before materialization for efficiency
+        if limit is not None:
+            lf = lf.head(limit)
+        
+        # Collect the filtered integer facts
+        fact_df = lf.collect()
+        
+        if len(fact_df) == 0:
+            return self._create_empty_dataframe()
+        
+        # Materialize only the filtered subset to strings
+        result = self._materialize_facts_to_strings(fact_df)
+        
+        # Apply post-materialization filters (source is stored as TermId)
+        if source is not None:
+            result = result.filter(pl.col("source") == source)
+        
+        return result
+    
+    def _materialize_facts_to_strings(self, fact_df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Materialize integer-encoded facts to string DataFrame.
+        
+        This is the core string materialization logic, extracted for reuse.
+        Only materializes the provided facts, not the entire store.
+        
+        Args:
+            fact_df: DataFrame with integer-encoded facts
+            
+        Returns:
+            DataFrame with string columns
+        """
+        if len(fact_df) == 0:
+            return self._create_empty_dataframe()
+        
+        # Build term lookup DataFrame
+        term_rows = [
+            {"term_id": tid, "lex": term.lex, "kind": int(term.kind),
+             "datatype_id": term.datatype_id if term.datatype_id else 0}
+            for tid, term in self._term_dict._id_to_term.items()
+        ]
+        
+        if not term_rows:
+            return self._create_empty_dataframe()
+        
+        term_df = pl.DataFrame(term_rows).cast({
+            "term_id": pl.UInt64,
+            "lex": pl.Utf8,
+            "kind": pl.UInt8,
+            "datatype_id": pl.UInt64,
+        })
+        
+        # Get XSD datatype IDs
+        xsd_integer_id = self._term_dict.xsd_integer_id
+        xsd_decimal_id = self._term_dict.xsd_decimal_id
+        xsd_double_id = self._term_dict.xsd_double_id
+        xsd_boolean_id = self._term_dict.xsd_boolean_id
+        
+        # Use lazy execution for join optimization
+        result = fact_df.lazy()
+        term_lazy = term_df.lazy()
+        
+        # Subject join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("subject")]),
+            left_on="s", right_on="term_id", how="left"
+        )
+        
+        # Predicate join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("predicate")]),
+            left_on="p", right_on="term_id", how="left"
+        )
+        
+        # Object join with kind and datatype
+        result = result.join(
+            term_lazy.select([
+                pl.col("term_id"),
+                pl.col("lex").alias("object"),
+                pl.col("kind").alias("obj_kind"),
+                pl.col("datatype_id").alias("obj_datatype_id"),
+            ]),
+            left_on="o", right_on="term_id", how="left"
+        )
+        
+        # Graph join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("graph")]),
+            left_on="g", right_on="term_id", how="left"
+        )
+        
+        # Replace 0 with null for optional provenance columns
+        result = result.with_columns([
+            pl.when(pl.col("source") == 0).then(pl.lit(None).cast(pl.UInt64)).otherwise(pl.col("source")).alias("source"),
+            pl.when(pl.col("process") == 0).then(pl.lit(None).cast(pl.UInt64)).otherwise(pl.col("process")).alias("process"),
+        ])
+        
+        # Source join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("source_str")]),
+            left_on="source", right_on="term_id", how="left"
+        )
+        
+        # Process join
+        result = result.join(
+            term_lazy.select([pl.col("term_id"), pl.col("lex").alias("process_str")]),
+            left_on="process", right_on="term_id", how="left"
+        )
+        
+        # Add computed columns
+        result = result.with_columns([
+            # Object type
+            pl.when(pl.col("obj_kind") == int(TermKind.IRI)).then(pl.lit("uri"))
+              .when(pl.col("obj_kind") == int(TermKind.BNODE)).then(pl.lit("bnode"))
+              .otherwise(pl.lit("literal"))
+              .alias("object_type"),
+            # Typed numeric value
+            pl.when(
+                (pl.col("obj_datatype_id") == xsd_integer_id) |
+                (pl.col("obj_datatype_id") == xsd_decimal_id) |
+                (pl.col("obj_datatype_id") == xsd_double_id)
+            ).then(
+                pl.col("object").cast(pl.Float64, strict=False)
+            ).when(
+                pl.col("obj_datatype_id") == xsd_boolean_id
+            ).then(
+                pl.when(pl.col("object") == "true").then(pl.lit(1.0))
+                  .when(pl.col("object") == "false").then(pl.lit(0.0))
+                  .otherwise(pl.lit(None))
+            ).otherwise(pl.lit(None).cast(pl.Float64))
+            .alias("object_value"),
+            # Deprecated flag
+            ((pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)) != 0).alias("deprecated"),
+            # Timestamp - use microseconds to match _create_empty_dataframe schema
+            pl.col("t_added").cast(pl.Datetime("us", "UTC")).alias("timestamp"),
+        ])
+        
+        # Collect and finalize schema
+        result = result.collect()
+        
+        n = len(result)
+        result = result.select([
+            pl.arange(0, n, eager=True).cast(pl.Utf8).alias("assertion_id"),
+            "subject",
+            "predicate",
+            "object",
+            "object_type",
+            "object_value",
+            "graph",
+            pl.lit(None).cast(pl.Utf8).alias("quoted_triple_id"),
+            pl.col("source_str").alias("source"),
+            "timestamp",
+            "confidence",
+            pl.col("process_str").alias("process"),
+            pl.lit(None).cast(pl.Utf8).alias("version"),
+            pl.lit("{}").alias("metadata"),
+            pl.lit(None).cast(pl.Utf8).alias("superseded_by"),
+            "deprecated",
+        ])
+        
+        return result
+
     def add_triple(
         self,
         subject: str,

@@ -3,11 +3,16 @@ import * as d3 from 'd3'
 import SparqlEditor from './components/SparqlEditor'
 import SchemaBrowser from './components/SchemaBrowser'
 import ImportExport from './components/ImportExport'
+import Dashboard from './components/Dashboard'
+import Security from './components/Security'
+import SQLExplorer from './components/SQLExplorer'
+import AIGrounding from './components/AIGrounding'
 import {
   DatabaseIcon, PlayIcon, PlusIcon, TrashIcon, FolderIcon,
   TableIcon, NetworkIcon, CodeIcon, SunIcon, MoonIcon,
   SearchIcon, SettingsIcon, BookIcon, ZapIcon, GlobeIcon,
-  ChevronDownIcon, CloseIcon, RefreshIcon
+  ChevronDownIcon, CloseIcon, RefreshIcon, HomeIcon, ShieldIcon,
+  TerminalIcon, BrainIcon
 } from './components/Icons'
 import './index.css'
 
@@ -349,6 +354,9 @@ function App() {
     return saved || 'dark'
   })
   
+  // Navigation state
+  const [activeTab, setActiveTab] = useState('dashboard') // 'dashboard' | 'workbench'
+  
   // Repository state
   const [repositories, setRepositories] = useState([])
   const [currentRepo, setCurrentRepo] = useState(null)
@@ -373,6 +381,7 @@ function App() {
   const [detailsPanel, setDetailsPanel] = useState(false) // Right panel visibility
   const [expandedSections, setExpandedSections] = useState({ objectProps: true, dataProps: true, provenance: false, annotations: false, metadata: false })
   const [expandedProps, setExpandedProps] = useState({}) // Track expanded property accordions for competing claims
+  const [showQueryHelpers, setShowQueryHelpers] = useState(false) // Query helpers panel
   
   // API state
   const [apiStatus, setApiStatus] = useState('checking')
@@ -825,12 +834,134 @@ function App() {
     })
   }
 
-  // Sample queries
-  const sampleQueries = [
-    { icon: '📊', label: 'All Triples', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100' },
-    { icon: '🔗', label: 'Relationships', query: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?o)) } LIMIT 100' },
-    { icon: '📈', label: 'Statistics', query: 'SELECT ?p (COUNT(*) AS ?count) WHERE { ?s ?p ?o } GROUP BY ?p ORDER BY DESC(?count)' },
-    { icon: '🏷️', label: 'Classes', query: 'SELECT ?class (COUNT(?s) AS ?count) WHERE { ?s a ?class } GROUP BY ?class ORDER BY DESC(?count)' },
+  // Comprehensive query helpers with categories
+  const queryHelpers = [
+    // Basic SPARQL
+    { 
+      category: 'basic', 
+      name: 'Select All Triples', 
+      description: 'Retrieve all triples in the graph with a limit',
+      query: 'SELECT ?s ?p ?o\nWHERE {\n  ?s ?p ?o\n}\nLIMIT 100'
+    },
+    { 
+      category: 'basic', 
+      name: 'Distinct Predicates', 
+      description: 'List all unique predicates (properties) in the graph',
+      query: 'SELECT DISTINCT ?predicate\nWHERE {\n  ?s ?predicate ?o\n}\nORDER BY ?predicate'
+    },
+    { 
+      category: 'basic', 
+      name: 'Entity Properties', 
+      description: 'Get all properties for a specific entity',
+      query: '# Replace <entity_uri> with your entity\nSELECT ?predicate ?object\nWHERE {\n  <http://example.org/entity> ?predicate ?object\n}'
+    },
+    { 
+      category: 'basic', 
+      name: 'Filter by Pattern', 
+      description: 'Find entities matching a name pattern',
+      query: 'SELECT ?entity ?name\nWHERE {\n  ?entity <http://schema.org/name> ?name .\n  FILTER(CONTAINS(LCASE(?name), "example"))\n}'
+    },
+    // Analytics
+    { 
+      category: 'analytics', 
+      name: 'Predicate Statistics', 
+      description: 'Count occurrences of each predicate',
+      query: 'SELECT ?predicate (COUNT(*) AS ?count)\nWHERE {\n  ?s ?predicate ?o\n}\nGROUP BY ?predicate\nORDER BY DESC(?count)'
+    },
+    { 
+      category: 'analytics', 
+      name: 'Class Distribution', 
+      description: 'Count instances per class type',
+      query: 'SELECT ?class (COUNT(?entity) AS ?count)\nWHERE {\n  ?entity a ?class\n}\nGROUP BY ?class\nORDER BY DESC(?count)'
+    },
+    { 
+      category: 'analytics', 
+      name: 'Top Connected Entities', 
+      description: 'Find entities with most relationships',
+      query: 'SELECT ?entity (COUNT(*) AS ?connections)\nWHERE {\n  { ?entity ?p ?o } UNION { ?s ?p ?entity }\n}\nGROUP BY ?entity\nORDER BY DESC(?connections)\nLIMIT 20'
+    },
+    // SPARQL-Star - Provenance
+    { 
+      category: 'sparql-star', 
+      name: 'All Assertions with Provenance', 
+      description: 'Find facts annotated with source and confidence using RDF-Star syntax',
+      query: 'SELECT ?s ?p ?o ?source ?confidence\nWHERE {\n  <<?s ?p ?o>> <http://example.org/source> ?source ;\n               <http://example.org/confidence> ?confidence .\n}\nLIMIT 50'
+    },
+    { 
+      category: 'sparql-star', 
+      name: 'High Confidence Facts', 
+      description: 'Filter facts by confidence score using SPARQL-Star',
+      query: 'SELECT ?s ?p ?o ?confidence\nWHERE {\n  <<?s ?p ?o>> <http://example.org/confidence> ?confidence .\n  FILTER(?confidence >= 0.9)\n}\nORDER BY DESC(?confidence)'
+    },
+    { 
+      category: 'sparql-star', 
+      name: 'Facts by Source', 
+      description: 'Find all facts from a specific data source',
+      query: '# Replace "WikiData" with your source\nSELECT ?s ?p ?o\nWHERE {\n  <<?s ?p ?o>> <http://example.org/source> "WikiData" .\n}'
+    },
+    { 
+      category: 'sparql-star', 
+      name: 'Temporal Annotations', 
+      description: 'Find facts with timestamp metadata',
+      query: 'SELECT ?s ?p ?o ?timestamp\nWHERE {\n  <<?s ?p ?o>> <http://example.org/timestamp> ?timestamp .\n}\nORDER BY DESC(?timestamp)\nLIMIT 50'
+    },
+    { 
+      category: 'sparql-star', 
+      name: 'Annotated Relationships', 
+      description: 'Find relationships with any annotations',
+      query: 'SELECT ?s ?p ?o ?annotationPred ?annotationVal\nWHERE {\n  ?s ?p ?o .\n  FILTER(isIRI(?o))\n  <<?s ?p ?o>> ?annotationPred ?annotationVal .\n}\nLIMIT 50'
+    },
+    // Provenance extension filters
+    { 
+      category: 'provenance', 
+      name: 'Filter by Source (Extension)', 
+      description: 'Use FILTER_SOURCE extension to filter by data source',
+      query: 'SELECT ?s ?p ?o\nWHERE {\n  ?s ?p ?o .\n  FILTER_SOURCE(?source = "IMDB")\n}\nLIMIT 50'
+    },
+    { 
+      category: 'provenance', 
+      name: 'Filter by Confidence (Extension)', 
+      description: 'Use FILTER_CONFIDENCE extension for threshold filtering',
+      query: 'SELECT ?s ?p ?o\nWHERE {\n  ?s ?p ?o .\n  FILTER_CONFIDENCE(?conf >= 0.8)\n}\nLIMIT 50'
+    },
+    { 
+      category: 'provenance', 
+      name: 'Compare Sources', 
+      description: 'Find facts that exist in multiple sources',
+      query: 'SELECT ?s ?p ?o (COUNT(DISTINCT ?source) AS ?sourceCount)\nWHERE {\n  <<?s ?p ?o>> <http://example.org/source> ?source .\n}\nGROUP BY ?s ?p ?o\nHAVING (COUNT(DISTINCT ?source) > 1)\nORDER BY DESC(?sourceCount)'
+    },
+    // Graph patterns
+    { 
+      category: 'patterns', 
+      name: 'Two-Hop Paths', 
+      description: 'Find entities connected through an intermediate node',
+      query: 'SELECT ?start ?middle ?end\nWHERE {\n  ?start ?p1 ?middle .\n  ?middle ?p2 ?end .\n  FILTER(isIRI(?middle) && isIRI(?end))\n}\nLIMIT 50'
+    },
+    { 
+      category: 'patterns', 
+      name: 'Find Property Paths', 
+      description: 'Use property paths to find transitive relationships',
+      query: 'SELECT ?ancestor ?descendant\nWHERE {\n  ?descendant <http://www.w3.org/2000/01/rdf-schema#subClassOf>+ ?ancestor .\n}\nLIMIT 50'
+    },
+    { 
+      category: 'patterns', 
+      name: 'Optional Properties', 
+      description: 'Include optional properties that may not exist',
+      query: 'SELECT ?entity ?name ?description\nWHERE {\n  ?entity <http://schema.org/name> ?name .\n  OPTIONAL { ?entity <http://schema.org/description> ?description }\n}\nLIMIT 50'
+    },
+    // Existence checks
+    { 
+      category: 'existence', 
+      name: 'ASK - Entity Exists', 
+      description: 'Check if any entity has a specific name',
+      query: 'ASK WHERE {\n  ?entity <http://schema.org/name> "Inception"\n}'
+    },
+    { 
+      category: 'existence', 
+      name: 'ASK - Relationship Exists', 
+      description: 'Check if a specific relationship exists',
+      query: 'ASK WHERE {\n  ?s <http://schema.org/director> ?o\n}'
+    },
   ]
 
   // Offline screen
@@ -883,6 +1014,40 @@ function App() {
             <DatabaseIcon size={24} />
             <span>RDF-StarBase</span>
           </div>
+          
+          {/* Tab Navigation */}
+          <div className="app-tabs">
+            <button 
+              className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
+              onClick={() => setActiveTab('dashboard')}
+            >
+              <HomeIcon size={16} /> Dashboard
+            </button>
+            <button 
+              className={`tab-btn ${activeTab === 'workbench' ? 'active' : ''}`}
+              onClick={() => setActiveTab('workbench')}
+            >
+              <CodeIcon size={16} /> Workbench
+            </button>
+            <button 
+              className={`tab-btn ${activeTab === 'security' ? 'active' : ''}`}
+              onClick={() => setActiveTab('security')}
+            >
+              <ShieldIcon size={16} /> Security
+            </button>
+            <button 
+              className={`tab-btn ${activeTab === 'sql' ? 'active' : ''}`}
+              onClick={() => setActiveTab('sql')}
+            >
+              <TerminalIcon size={16} /> SQL
+            </button>
+            <button 
+              className={`tab-btn ${activeTab === 'ai' ? 'active' : ''}`}
+              onClick={() => setActiveTab('ai')}
+            >
+              <BrainIcon size={16} /> AI Grounding
+            </button>
+          </div>
         </div>
 
         <div className="header-center">
@@ -928,21 +1093,44 @@ function App() {
 
       {/* Main Content */}
       <main className="app-main">
+        {activeTab === 'dashboard' ? (
+          <Dashboard 
+            repositories={repositories}
+            currentRepo={currentRepo}
+            onNavigateToWorkbench={() => setActiveTab('workbench')}
+            onRunQuery={(query) => {
+              setActiveTab('workbench')
+              setSparqlQuery(query)
+              setTimeout(() => executeSparql(query), 100)
+            }}
+            onCreateRepo={() => setShowCreateModal(true)}
+            onSelectRepo={setCurrentRepo}
+            onRefreshRepos={loadRepositories}
+            onOpenImport={() => {
+              setActiveTab('workbench')
+              setSidePanel('import')
+            }}
+            theme={theme}
+          />
+        ) : activeTab === 'security' ? (
+          <Security theme={theme} />
+        ) : activeTab === 'sql' ? (
+          <SQLExplorer theme={theme} currentRepo={currentRepo} />
+        ) : activeTab === 'ai' ? (
+          <AIGrounding theme={theme} currentRepo={currentRepo} />
+        ) : (
+        <>
         {/* Query Panel */}
         <div className="query-panel">
           <div className="query-toolbar">
-            <div className="quick-queries">
-              {sampleQueries.map((sq, i) => (
-                <button
-                  key={i}
-                  className="quick-query-btn"
-                  onClick={() => { setSparqlQuery(sq.query); executeSparql(sq.query) }}
-                  title={sq.query}
-                >
-                  {sq.icon} {sq.label}
-                </button>
-              ))}
-            </div>
+            <button 
+              className={`btn ${showQueryHelpers ? 'primary' : 'secondary'}`}
+              onClick={() => setShowQueryHelpers(!showQueryHelpers)}
+            >
+              <BookIcon size={16} />
+              Query Templates
+              <ChevronDownIcon size={14} style={{ transform: showQueryHelpers ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+            </button>
             <button 
               className="btn primary execute-btn"
               onClick={() => executeSparql()}
@@ -967,6 +1155,36 @@ function App() {
             <div className="error-bar">
               <span>{error}</span>
               <button onClick={() => setError(null)}><CloseIcon size={14} /></button>
+            </div>
+          )}
+
+          {/* Query Helpers Panel */}
+          {showQueryHelpers && (
+            <div className="query-helpers-panel">
+              <div className="helpers-header">
+                <h3><BookIcon size={16} /> SPARQL Query Templates</h3>
+                <p className="helpers-intro">
+                  Click a template to load it into the editor. Includes standard SPARQL and RDF-Star extensions for provenance.
+                </p>
+              </div>
+              <div className="helpers-grid">
+                {queryHelpers.map((helper, i) => (
+                  <div 
+                    key={i} 
+                    className="query-helper-card"
+                    onClick={() => { setSparqlQuery(helper.query); setShowQueryHelpers(false) }}
+                  >
+                    <div className="helper-header">
+                      <span className="helper-name">{helper.name}</span>
+                      <span className={`helper-category cat-${helper.category}`}>
+                        {helper.category}
+                      </span>
+                    </div>
+                    <p className="helper-description">{helper.description}</p>
+                    <code className="helper-preview">{helper.query.split('\n')[0]}...</code>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -1303,9 +1521,6 @@ function App() {
 
             {sidePanel && (
               <div className="side-panel">
-                <button className="close-panel" onClick={() => setSidePanel(null)}>
-                  <CloseIcon size={16} />
-                </button>
                 {sidePanel === 'schema' && (
                   <SchemaBrowser 
                     repositoryName={currentRepo} 
@@ -1324,6 +1539,8 @@ function App() {
             )}
           </div>
         </div>
+        </>
+        )}
       </main>
     </div>
   )

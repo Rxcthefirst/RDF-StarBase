@@ -552,4 +552,9 @@ class TestRepositoryAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "test-repo"
-        assert "stats" in data
+        # Check for UI-friendly flattened stats
+        assert "triple_count" in data
+        assert "subject_count" in data
+        assert "predicate_count" in data
+        # Detailed stats in 'details' 
+        assert "details" in data

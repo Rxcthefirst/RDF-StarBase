@@ -9,6 +9,12 @@ Provides a SQL interface to the columnar RDF storage, enabling:
 
 DuckDB reads Parquet files directly without copying data into memory,
 making it ideal for analytical workloads on large datasets.
+
+Performance optimizations:
+- Connection reuse via cached interface on TripleStore
+- Integer-based 'facts' table is always available without materialization
+- Lazy registration of expensive 'triples' table (string-based)
+- Arrow table caching with version stamps
 """
 
 from __future__ import annotations
@@ -16,7 +22,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any, Dict, List, Union, TYPE_CHECKING
+from weakref import WeakKeyDictionary
 import json
+import re
 
 try:
     import duckdb
@@ -28,6 +36,9 @@ import polars as pl
 
 if TYPE_CHECKING:
     from rdf_starbase.store import TripleStore
+
+# Global cache for DuckDB interfaces per store (weak references)
+_interface_cache: WeakKeyDictionary["TripleStore", "DuckDBInterface"] = WeakKeyDictionary()
 
 
 @dataclass
@@ -72,10 +83,16 @@ class DuckDBInterface:
     registration of triple store tables.
     
     Tables available:
-    - triples: Main triple data (subject, predicate, object, graph)
+    - facts: Raw integer-encoded facts (fast, always available)
     - terms: Term dictionary (term_id, kind, lex)
-    - facts: Raw integer-encoded facts
+    - triples: Main triple data (subject, predicate, object, graph) - lazily materialized
     - provenance: Provenance metadata
+    
+    Performance optimizations:
+    - 'facts' table uses integer storage directly (no materialization)
+    - 'triples' table is lazily registered only when queried
+    - Arrow conversions are cached with version stamps
+    - Use get_cached_interface() for connection reuse
     
     Example:
         interface = DuckDBInterface(store)
@@ -107,60 +124,129 @@ class DuckDBInterface:
         self._store = store
         self._read_only = read_only
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
-        self._tables_registered = False
+        
+        # Track what's registered
+        self._facts_registered = False
+        self._terms_registered = False
+        self._triples_registered = False
+        self._views_created = False
+        
+        # Version tracking for cache invalidation
+        self._facts_version: int = -1
+        self._terms_version: int = -1
     
     def _ensure_connection(self) -> duckdb.DuckDBPyConnection:
         """Ensure DuckDB connection is established."""
         if self._conn is None:
             # Create in-memory database
             self._conn = duckdb.connect(":memory:", read_only=False)
-            # Register the Polars DataFrames as views
-            self._register_tables()
+            # Register only the fast tables initially
+            self._register_core_tables()
         return self._conn
     
-    def _register_tables(self) -> None:
-        """Register TripleStore DataFrames as DuckDB tables."""
-        if self._tables_registered:
-            return
+    def _get_store_version(self) -> int:
+        """Get a version stamp from the store for cache invalidation."""
+        # Use fact count as a simple version indicator
+        return len(self._store._fact_store._df)
+    
+    def _get_terms_version(self) -> int:
+        """Get term dictionary version."""
+        return len(self._store._term_dict._id_to_term)
+    
+    def _register_core_tables(self) -> None:
+        """
+        Register core integer-based tables (fast, no string materialization).
         
+        Only registers 'facts' and 'terms' tables which don't require
+        the expensive _df materialization.
+        """
         conn = self._conn
         if conn is None:
             return
         
-        # Register the string-based triple view
-        triples_df = self._store._df
-        conn.register("triples", triples_df.to_arrow())
+        current_facts_version = self._get_store_version()
+        current_terms_version = self._get_terms_version()
         
-        # Register the raw facts table (integer-encoded)
-        facts_df = self._store._fact_store._df
-        conn.register("facts", facts_df.to_arrow())
+        # Register facts table (integer-encoded, direct access)
+        if not self._facts_registered or self._facts_version != current_facts_version:
+            if self._facts_registered:
+                try:
+                    conn.unregister("facts")
+                except Exception:
+                    pass
+            facts_df = self._store._fact_store._df
+            conn.register("facts", facts_df.to_arrow())
+            self._facts_registered = True
+            self._facts_version = current_facts_version
         
-        # Register the term dictionary
-        term_rows = [
-            {
-                "term_id": tid,
-                "kind": term.kind.value,
-                "kind_name": term.kind.name,
-                "lex": term.lex,
-            }
-            for tid, term in self._store._term_dict._id_to_term.items()
-        ]
-        if term_rows:
-            terms_df = pl.DataFrame(term_rows)
-            conn.register("terms", terms_df.to_arrow())
-        else:
-            # Empty terms table
-            terms_df = pl.DataFrame({
-                "term_id": pl.Series([], dtype=pl.UInt64),
-                "kind": pl.Series([], dtype=pl.UInt8),
-                "kind_name": pl.Series([], dtype=pl.Utf8),
-                "lex": pl.Series([], dtype=pl.Utf8),
-            })
-            conn.register("terms", terms_df.to_arrow())
+        # Register terms table
+        if not self._terms_registered or self._terms_version != current_terms_version:
+            if self._terms_registered:
+                try:
+                    conn.unregister("terms")
+                except Exception:
+                    pass
+            term_rows = [
+                {
+                    "term_id": tid,
+                    "kind": term.kind.value,
+                    "kind_name": term.kind.name,
+                    "lex": term.lex,
+                }
+                for tid, term in self._store._term_dict._id_to_term.items()
+            ]
+            if term_rows:
+                terms_df = pl.DataFrame(term_rows)
+                conn.register("terms", terms_df.to_arrow())
+            else:
+                terms_df = pl.DataFrame({
+                    "term_id": pl.Series([], dtype=pl.UInt64),
+                    "kind": pl.Series([], dtype=pl.UInt8),
+                    "kind_name": pl.Series([], dtype=pl.Utf8),
+                    "lex": pl.Series([], dtype=pl.Utf8),
+                })
+                conn.register("terms", terms_df.to_arrow())
+            self._terms_registered = True
+            self._terms_version = current_terms_version
+    
+    def _ensure_triples_table(self) -> None:
+        """
+        Lazily register the 'triples' table when needed.
         
-        # Create a provenance view (filtered facts with source info)
+        This is more expensive as it requires materializing strings.
+        """
+        conn = self._ensure_connection()
+        
+        current_version = self._get_store_version()
+        
+        if not self._triples_registered or self._facts_version != current_version:
+            # Unregister old if exists
+            if self._triples_registered:
+                try:
+                    conn.unregister("triples")
+                except Exception:
+                    pass
+                # Also drop views that depend on triples
+                self._drop_views()
+            
+            # Register the string-based triple view (triggers _df materialization)
+            triples_df = self._store._df
+            conn.register("triples", triples_df.to_arrow())
+            self._triples_registered = True
+    
+    def _ensure_views(self) -> None:
+        """Create views that depend on the triples table."""
+        if self._views_created:
+            return
+        
+        conn = self._ensure_connection()
+        
+        # Make sure triples table exists first
+        self._ensure_triples_table()
+        
+        # Create views
         conn.execute("""
-            CREATE VIEW provenance AS
+            CREATE OR REPLACE VIEW provenance AS
             SELECT 
                 assertion_id,
                 subject,
@@ -174,17 +260,15 @@ class DuckDBInterface:
             WHERE source IS NOT NULL OR confidence < 1.0
         """)
         
-        # Create a named_graphs view
         conn.execute("""
-            CREATE VIEW named_graphs AS
+            CREATE OR REPLACE VIEW named_graphs AS
             SELECT DISTINCT graph
             FROM triples
             WHERE graph IS NOT NULL
         """)
         
-        # Create an rdf_type view for easy class queries
         conn.execute("""
-            CREATE VIEW rdf_types AS
+            CREATE OR REPLACE VIEW rdf_types AS
             SELECT 
                 subject,
                 object AS type,
@@ -193,30 +277,71 @@ class DuckDBInterface:
             WHERE predicate LIKE '%type%'
         """)
         
-        self._tables_registered = True
+        self._views_created = True
+    
+    def _drop_views(self) -> None:
+        """Drop views that depend on triples table."""
+        if self._conn is None:
+            return
+        try:
+            self._conn.execute("DROP VIEW IF EXISTS provenance")
+            self._conn.execute("DROP VIEW IF EXISTS named_graphs")
+            self._conn.execute("DROP VIEW IF EXISTS rdf_types")
+        except Exception:
+            pass
+        self._views_created = False
+    
+    def _query_needs_triples_table(self, sql: str) -> bool:
+        """
+        Check if query references the triples table (or its views).
+        
+        Queries on 'facts' and 'terms' tables don't need string materialization.
+        """
+        sql_upper = sql.upper()
+        # Check for table references that need string materialization
+        triples_patterns = [
+            r'\bTRIPLES\b',
+            r'\bPROVENANCE\b', 
+            r'\bNAMED_GRAPHS\b',
+            r'\bRDF_TYPES\b',
+        ]
+        for pattern in triples_patterns:
+            if re.search(pattern, sql_upper):
+                return True
+        return False
     
     def refresh_tables(self) -> None:
         """
         Refresh table registrations after store modifications.
         
         Call this after adding/removing triples to update the SQL views.
+        Invalidates version stamps to trigger re-registration on next query.
         """
+        # Reset version stamps to force re-registration on next access
+        self._facts_version = -1
+        self._terms_version = -1
+        self._triples_registered = False
+        self._views_created = False
+        
+        # If connection exists, re-register core tables
         if self._conn is not None:
-            # Drop existing views and tables
-            self._conn.execute("DROP VIEW IF EXISTS provenance")
-            self._conn.execute("DROP VIEW IF EXISTS named_graphs")
-            self._conn.execute("DROP VIEW IF EXISTS rdf_types")
-            
-            # Unregister tables
+            self._drop_views()
             try:
                 self._conn.unregister("triples")
+            except Exception:
+                pass
+            try:
                 self._conn.unregister("facts")
+            except Exception:
+                pass
+            try:
                 self._conn.unregister("terms")
             except Exception:
-                pass  # Tables might not exist
-            
-            self._tables_registered = False
-            self._register_tables()
+                pass
+            self._facts_registered = False
+            self._terms_registered = False
+            # Re-register core tables immediately
+            self._register_core_tables()
     
     def execute(
         self, 
@@ -226,6 +351,9 @@ class DuckDBInterface:
     ) -> SQLQueryResult:
         """
         Execute a SQL query against the triple store.
+        
+        Automatically determines whether the query needs string materialization
+        and only registers expensive tables when necessary.
         
         Args:
             sql: SQL query string
@@ -242,6 +370,10 @@ class DuckDBInterface:
         import time
         
         conn = self._ensure_connection()
+        
+        # Lazily register triples table if needed
+        if self._query_needs_triples_table(sql):
+            self._ensure_views()
         
         # Check read-only mode
         sql_upper = sql.strip().upper()
@@ -309,8 +441,16 @@ class DuckDBInterface:
         return str(value)
     
     def list_tables(self) -> List[TableInfo]:
-        """List all available tables and views."""
+        """
+        List all available tables and views.
+        
+        This method ensures all tables (including the lazily-loaded 'triples'
+        table) are registered before listing.
+        """
         self._ensure_connection()
+        
+        # Ensure all tables are registered for complete listing
+        self._ensure_views()  # This also ensures triples table
         
         result = self.execute("SHOW TABLES")
         
@@ -440,13 +580,50 @@ class DuckDBInterface:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
-            self._tables_registered = False
+            self._facts_registered = False
+            self._terms_registered = False
+            self._triples_registered = False
+            self._views_created = False
+            self._facts_version = -1
+            self._terms_version = -1
     
     def __enter__(self) -> "DuckDBInterface":
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+        # Don't close on context exit if using cached interface
+        # Only close if this is a standalone instance
+        if self._store not in _interface_cache or _interface_cache[self._store] is not self:
+            self.close()
+
+
+def get_cached_interface(store: "TripleStore", read_only: bool = True) -> DuckDBInterface:
+    """
+    Get or create a cached DuckDB interface for a TripleStore.
+    
+    This provides connection reuse across multiple queries, significantly
+    improving performance for repeated SQL access.
+    
+    The interface is cached per-store using weak references, so it will be
+    automatically cleaned up when the store is garbage collected.
+    
+    Args:
+        store: The TripleStore to expose via SQL
+        read_only: If True, only read operations allowed
+        
+    Returns:
+        Cached DuckDBInterface instance
+        
+    Raises:
+        ImportError: If duckdb is not installed
+    """
+    if store in _interface_cache:
+        return _interface_cache[store]
+    
+    # Create new interface and cache it
+    interface = DuckDBInterface(store, read_only=read_only)
+    _interface_cache[store] = interface
+    return interface
 
 
 def create_sql_interface(

@@ -282,13 +282,24 @@ def create_ai_router(store: TripleStore) -> APIRouter:
         # Build filters
         confidence_threshold = request.min_confidence.to_threshold()
         
-        # Get triples with filters
-        df = store.get_triples(
-            subject=request.subject,
-            predicate=request.predicate,
-            obj=request.object,
-            min_confidence=confidence_threshold,
-        )
+        # Use optimized query path with filter pushdown for performance
+        # This avoids materializing the entire DataFrame
+        if hasattr(store, 'get_triples_optimized'):
+            df = store.get_triples_optimized(
+                subject=request.subject,
+                predicate=request.predicate,
+                obj=request.object,
+                min_confidence=confidence_threshold,
+                limit=request.limit * 2 if request.sources or request.max_age_days else request.limit,
+            )
+        else:
+            # Fallback for older store implementations
+            df = store.get_triples(
+                subject=request.subject,
+                predicate=request.predicate,
+                obj=request.object,
+                min_confidence=confidence_threshold,
+            )
         
         total_count = len(df)
         
@@ -350,12 +361,19 @@ def create_ai_router(store: TripleStore) -> APIRouter:
         retrieval_time = datetime.utcnow()
         confidence_threshold = request.min_confidence.to_threshold()
         
-        # Get all facts matching subject + predicate
-        df = store.get_triples(
-            subject=request.subject,
-            predicate=request.predicate,
-            min_confidence=confidence_threshold,
-        )
+        # Use optimized query path - verify always has subject+predicate filters
+        if hasattr(store, 'get_triples_optimized'):
+            df = store.get_triples_optimized(
+                subject=request.subject,
+                predicate=request.predicate,
+                min_confidence=confidence_threshold,
+            )
+        else:
+            df = store.get_triples(
+                subject=request.subject,
+                predicate=request.predicate,
+                min_confidence=confidence_threshold,
+            )
         
         if len(df) == 0:
             return ClaimVerificationResponse(
@@ -485,21 +503,40 @@ def create_ai_router(store: TripleStore) -> APIRouter:
         retrieval_time = datetime.utcnow()
         confidence_threshold = min_confidence.to_threshold()
         
-        # Get outgoing facts (entity as subject)
-        df_out = store.get_triples(
-            subject=entity,
-            min_confidence=confidence_threshold,
-        )
-        
-        # Get incoming facts (entity as object) if requested
-        if include_incoming:
-            df_in = store.get_triples(
-                obj=entity,
+        # Use optimized query path with filter pushdown for performance
+        if hasattr(store, 'get_triples_optimized'):
+            # Get outgoing facts (entity as subject)
+            df_out = store.get_triples_optimized(
+                subject=entity,
+                min_confidence=confidence_threshold,
+                limit=limit,
+            )
+            
+            # Get incoming facts (entity as object) if requested
+            if include_incoming:
+                df_in = store.get_triples_optimized(
+                    obj=entity,
+                    min_confidence=confidence_threshold,
+                    limit=limit,
+                )
+                df = pl.concat([df_out, df_in]).unique()
+            else:
+                df = df_out
+        else:
+            # Fallback for older store implementations
+            df_out = store.get_triples(
+                subject=entity,
                 min_confidence=confidence_threshold,
             )
-            df = pl.concat([df_out, df_in]).unique()
-        else:
-            df = df_out
+            
+            if include_incoming:
+                df_in = store.get_triples(
+                    obj=entity,
+                    min_confidence=confidence_threshold,
+                )
+                df = pl.concat([df_out, df_in]).unique()
+            else:
+                df = df_out
         
         df = df.head(limit)
         

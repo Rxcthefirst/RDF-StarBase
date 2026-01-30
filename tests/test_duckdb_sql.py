@@ -10,6 +10,7 @@ from rdf_starbase.storage.duckdb import (
     DuckDBInterface,
     SQLQueryResult,
     create_sql_interface,
+    get_cached_interface,
     check_duckdb_available,
 )
 
@@ -230,3 +231,83 @@ class TestSQLQueryResult:
         df = result.to_polars()
         assert len(df) == 0
         assert list(df.columns) == ["x", "y"]
+
+
+class TestCachedInterface:
+    """Test cached interface functionality for performance optimization."""
+    
+    def test_get_cached_interface(self, sample_store):
+        """Should return cached interface for same store."""
+        sql1 = get_cached_interface(sample_store)
+        sql2 = get_cached_interface(sample_store)
+        
+        # Same interface instance should be returned
+        assert sql1 is sql2
+        
+        # Both should work correctly
+        result = sql1.execute("SELECT COUNT(*) as cnt FROM facts")
+        assert result.rows[0][0] == 8  # 8 facts added
+    
+    def test_cached_interface_connection_reuse(self, sample_store):
+        """Should reuse DuckDB connection across queries."""
+        sql = get_cached_interface(sample_store)
+        
+        # First query
+        result1 = sql.execute("SELECT COUNT(*) FROM facts")
+        conn1 = sql._conn
+        
+        # Second query should use same connection
+        result2 = sql.execute("SELECT COUNT(*) FROM terms")
+        conn2 = sql._conn
+        
+        assert conn1 is conn2
+    
+    def test_facts_table_no_materialization(self, sample_store):
+        """Queries on 'facts' table should not trigger string materialization."""
+        sql = get_cached_interface(sample_store)
+        
+        # Query facts (integer-based) without triggering triples registration
+        result = sql.execute("SELECT COUNT(*) FROM facts")
+        
+        # Triples table should NOT be registered yet (lazy loading)
+        assert not sql._triples_registered
+        
+        # But facts should be registered
+        assert sql._facts_registered
+    
+    def test_triples_table_lazy_registration(self, sample_store):
+        """Triples table should be lazily registered on first use."""
+        sql = get_cached_interface(sample_store)
+        
+        # Initially, triples should not be registered
+        # (note: fresh interface needed)
+        from rdf_starbase.storage.duckdb import DuckDBInterface
+        fresh_sql = DuckDBInterface(sample_store)
+        fresh_sql._ensure_connection()
+        
+        # After just connecting, triples should not be registered
+        assert not fresh_sql._triples_registered
+        
+        # Query triples table
+        fresh_sql.execute("SELECT * FROM triples LIMIT 1")
+        
+        # Now triples should be registered
+        assert fresh_sql._triples_registered
+        
+        fresh_sql.close()
+    
+    def test_query_needs_triples_detection(self, sample_store):
+        """Should correctly detect queries that need triples table."""
+        sql = get_cached_interface(sample_store)
+        
+        # Queries that don't need triples
+        assert not sql._query_needs_triples_table("SELECT * FROM facts")
+        assert not sql._query_needs_triples_table("SELECT * FROM terms")
+        assert not sql._query_needs_triples_table("SELECT COUNT(*) FROM facts WHERE s > 0")
+        
+        # Queries that need triples
+        assert sql._query_needs_triples_table("SELECT * FROM triples")
+        assert sql._query_needs_triples_table("SELECT subject FROM TRIPLES")
+        assert sql._query_needs_triples_table("SELECT * FROM provenance")
+        assert sql._query_needs_triples_table("SELECT * FROM named_graphs")
+        assert sql._query_needs_triples_table("SELECT * FROM rdf_types")

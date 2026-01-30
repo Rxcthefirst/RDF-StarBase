@@ -17,10 +17,11 @@ from uuid import UUID
 import json
 import os
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Header, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 import polars as pl
 
@@ -33,6 +34,7 @@ from rdf_starbase import (
     execute_sparql,
     parse_query,
 )
+from rdf_starbase.storage.auth import APIKeyManager, Role, Operation, AuthContext
 from rdf_starbase.ai_grounding import create_ai_router
 from rdf_starbase.repository_api import create_repository_router
 
@@ -98,6 +100,305 @@ def dataframe_to_records(df: pl.DataFrame) -> list[dict[str, Any]]:
     return records
 
 
+# =============================================================================
+# Security Router for API Key Management
+# =============================================================================
+
+def create_security_router(key_manager: APIKeyManager) -> APIRouter:
+    """Create router for security/API key management endpoints."""
+    router = APIRouter(prefix="/security", tags=["security"])
+    
+    @router.get("/status")
+    async def security_status():
+        """Get security configuration status."""
+        keys = key_manager.list_keys()
+        return {
+            "enabled": len(keys) > 0,
+            "key_count": len(keys),
+            "message": "Security is enabled. Use API keys for authenticated access." if keys else "Security not configured. All endpoints are open."
+        }
+    
+    @router.post("/keys")
+    async def create_api_key(
+        name: str,
+        role: str = "reader",
+        expires_days: Optional[int] = None,
+        rate_limit: Optional[int] = None,
+    ):
+        """Create a new API key.
+        
+        **Important**: The returned key is only shown once. Store it securely!
+        """
+        from datetime import timedelta
+        
+        try:
+            role_enum = Role(role.lower())
+        except ValueError:
+            raise HTTPException(400, f"Invalid role: {role}. Use: reader, writer, admin")
+        
+        expires_in = timedelta(days=expires_days) if expires_days else None
+        
+        raw_key, api_key = key_manager.generate_key(
+            name=name,
+            role=role_enum,
+            expires_in=expires_in,
+            rate_limit_queries=rate_limit,
+        )
+        
+        return {
+            "key": raw_key,  # Only returned once!
+            "key_id": api_key.key_id,
+            "name": api_key.name,
+            "role": api_key.role.value,
+            "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
+            "warning": "Store this key securely! It will not be shown again."
+        }
+    
+    @router.get("/keys")
+    async def list_api_keys():
+        """List all API keys (without revealing the actual keys)."""
+        keys = key_manager.list_keys()
+        return [
+            {
+                "key_id": k.key_id,
+                "name": k.name,
+                "role": k.role.value,
+                "created_at": k.created_at.isoformat(),
+                "expires_at": k.expires_at.isoformat() if k.expires_at else None,
+                "last_used": k.last_used.isoformat() if k.last_used else None,
+                "is_expired": k.is_expired,
+            }
+            for k in keys
+        ]
+    
+    @router.delete("/keys/{key_id}")
+    async def revoke_api_key(key_id: str):
+        """Revoke an API key."""
+        if key_manager.revoke_key(key_id):
+            return {"message": f"Key {key_id} revoked"}
+        raise HTTPException(404, f"Key not found: {key_id}")
+    
+    @router.get("/roles")
+    async def list_roles():
+        """List available roles and their permissions."""
+        return [
+            {
+                "role": "reader",
+                "description": "Read-only access. Can query data but not modify.",
+                "permissions": ["query", "describe", "export"]
+            },
+            {
+                "role": "writer", 
+                "description": "Read and write access. Can query and modify data.",
+                "permissions": ["query", "describe", "export", "insert", "delete", "update", "load"]
+            },
+            {
+                "role": "admin",
+                "description": "Full access including security and configuration.",
+                "permissions": ["all operations"]
+            }
+        ]
+    
+    return router
+
+
+# =============================================================================
+# SQL Router for DuckDB Interface
+# =============================================================================
+
+class SQLQuery(BaseModel):
+    """SQL query request."""
+    sql: str = Field(..., description="SQL query to execute")
+    limit: Optional[int] = Field(1000, ge=1, le=10000, description="Max rows to return")
+
+
+def create_sql_router(store: TripleStore) -> APIRouter:
+    """Create router for DuckDB SQL interface with query helpers."""
+    router = APIRouter(prefix="/sql", tags=["SQL"])
+    
+    # Lazy initialize DuckDB interface
+    _interface = None
+    
+    def get_interface():
+        nonlocal _interface
+        if _interface is None:
+            from rdf_starbase.storage.duckdb import DuckDBInterface, DUCKDB_AVAILABLE
+            if not DUCKDB_AVAILABLE:
+                raise HTTPException(503, "DuckDB not installed. Install with: pip install duckdb")
+            _interface = DuckDBInterface(store, read_only=True)
+        return _interface
+    
+    @router.post("/execute")
+    async def execute_sql(query: SQLQuery):
+        """
+        Execute a SQL query against the triple store.
+        
+        Available tables:
+        - **triples**: Main triple data (subject, predicate, object, graph, source, confidence, timestamp)
+        - **facts**: Raw integer-encoded facts (for advanced analysis)
+        - **terms**: Term dictionary (term_id, kind, lex)
+        - **provenance**: View of triples with source/confidence info
+        - **rdf_types**: View of rdf:type statements
+        - **named_graphs**: List of named graphs
+        """
+        try:
+            interface = get_interface()
+            result = interface.execute(query.sql, limit=query.limit)
+            return result.to_dict()
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(500, f"SQL Error: {str(e)}")
+    
+    @router.get("/tables")
+    async def list_tables():
+        """List all available tables and views with their row counts."""
+        try:
+            interface = get_interface()
+            tables = interface.list_tables()
+            return [
+                {
+                    "name": t.name,
+                    "columns": t.columns,
+                    "row_count": t.row_count,
+                }
+                for t in tables
+            ]
+        except Exception as e:
+            raise HTTPException(500, str(e))
+    
+    @router.get("/schema/{table_name}")
+    async def get_table_schema(table_name: str):
+        """Get the schema (column names and types) for a table."""
+        try:
+            interface = get_interface()
+            schema = interface.get_schema(table_name)
+            return {
+                "table": table_name,
+                "columns": schema,
+            }
+        except Exception as e:
+            raise HTTPException(404, f"Table not found or error: {str(e)}")
+    
+    @router.get("/sample/{table_name}")
+    async def sample_table(table_name: str, n: int = Query(10, ge=1, le=100)):
+        """Get a sample of rows from a table."""
+        try:
+            interface = get_interface()
+            result = interface.sample(table_name, n)
+            return result.to_dict()
+        except Exception as e:
+            raise HTTPException(500, str(e))
+    
+    @router.get("/helpers")
+    async def get_query_helpers():
+        """
+        Get a list of helpful SQL query templates for common operations.
+        These can be used directly or customized.
+        """
+        return {
+            "description": "SQL query templates for accessing claims in the triplestore",
+            "queries": [
+                {
+                    "name": "All Triples",
+                    "description": "Get all triples with provenance information",
+                    "sql": "SELECT subject, predicate, object, source, confidence, timestamp FROM triples LIMIT 100",
+                    "category": "basic"
+                },
+                {
+                    "name": "Count by Predicate",
+                    "description": "Count how many times each predicate is used",
+                    "sql": "SELECT predicate, COUNT(*) as count FROM triples GROUP BY predicate ORDER BY count DESC",
+                    "category": "analytics"
+                },
+                {
+                    "name": "Entity Types",
+                    "description": "List all entity types in the knowledge graph",
+                    "sql": "SELECT type, COUNT(*) as count FROM rdf_types GROUP BY type ORDER BY count DESC",
+                    "category": "schema"
+                },
+                {
+                    "name": "Claims by Source",
+                    "description": "Count claims grouped by source system",
+                    "sql": "SELECT source, COUNT(*) as claim_count, AVG(confidence) as avg_confidence FROM triples WHERE source IS NOT NULL GROUP BY source ORDER BY claim_count DESC",
+                    "category": "provenance"
+                },
+                {
+                    "name": "Low Confidence Claims",
+                    "description": "Find claims with confidence below 0.8",
+                    "sql": "SELECT subject, predicate, object, source, confidence FROM triples WHERE confidence < 0.8 ORDER BY confidence ASC LIMIT 50",
+                    "category": "quality"
+                },
+                {
+                    "name": "Recent Claims",
+                    "description": "Get the most recently added claims",
+                    "sql": "SELECT subject, predicate, object, source, timestamp FROM triples WHERE timestamp IS NOT NULL ORDER BY timestamp DESC LIMIT 50",
+                    "category": "temporal"
+                },
+                {
+                    "name": "Find Entity Properties",
+                    "description": "Get all properties of a specific entity (replace URI)",
+                    "sql": "SELECT predicate, object, source, confidence FROM triples WHERE subject = 'http://example.org/entity' LIMIT 100",
+                    "category": "entity"
+                },
+                {
+                    "name": "Competing Claims Detection",
+                    "description": "Find subject-predicate pairs with multiple different values (potential conflicts)",
+                    "sql": """SELECT subject, predicate, COUNT(DISTINCT object) as value_count, 
+       ARRAY_AGG(DISTINCT object) as values
+FROM triples 
+GROUP BY subject, predicate 
+HAVING COUNT(DISTINCT object) > 1
+ORDER BY value_count DESC
+LIMIT 20""",
+                    "category": "quality"
+                },
+                {
+                    "name": "Source Coverage",
+                    "description": "Analyze which predicates each source provides",
+                    "sql": """SELECT source, 
+       COUNT(DISTINCT predicate) as predicate_types,
+       COUNT(DISTINCT subject) as entities,
+       COUNT(*) as total_claims
+FROM triples 
+WHERE source IS NOT NULL
+GROUP BY source""",
+                    "category": "provenance"
+                },
+                {
+                    "name": "Named Graphs Summary",
+                    "description": "Count triples per named graph",
+                    "sql": "SELECT graph, COUNT(*) as triple_count FROM triples WHERE graph IS NOT NULL GROUP BY graph ORDER BY triple_count DESC",
+                    "category": "organization"
+                },
+                {
+                    "name": "Term Dictionary Stats",
+                    "description": "Analyze the term dictionary by kind",
+                    "sql": "SELECT kind_name, COUNT(*) as count FROM terms GROUP BY kind_name ORDER BY count DESC",
+                    "category": "internals"
+                },
+                {
+                    "name": "Full-Text Search",
+                    "description": "Search for entities containing a keyword (replace 'keyword')",
+                    "sql": "SELECT DISTINCT subject FROM triples WHERE subject LIKE '%keyword%' OR object LIKE '%keyword%' LIMIT 50",
+                    "category": "search"
+                },
+            ]
+        }
+    
+    @router.post("/refresh")
+    async def refresh_tables():
+        """Refresh the DuckDB table registrations after data changes."""
+        try:
+            interface = get_interface()
+            interface.refresh_tables()
+            return {"message": "Tables refreshed successfully"}
+        except Exception as e:
+            raise HTTPException(500, str(e))
+    
+    return router
+
+
 def create_app(store: Optional[TripleStore] = None, registry: Optional[AssertionRegistry] = None) -> FastAPI:
     """
     Create the FastAPI application.
@@ -130,6 +431,13 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
     app.state.store = store or TripleStore()
     app.state.registry = registry or AssertionRegistry()
     
+    # Security - API Key Manager
+    from pathlib import Path
+    data_dir = Path(os.getenv("RDFSTARBASE_DATA_DIR", "./data"))
+    key_storage = data_dir / "security" / "api_keys.json"
+    key_storage.parent.mkdir(parents=True, exist_ok=True)
+    app.state.key_manager = APIKeyManager(storage_path=key_storage)
+    
     # Add Repository Management router
     repo_router, repo_manager = create_repository_router()
     app.include_router(repo_router)
@@ -138,6 +446,14 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
     # Add AI Grounding API router
     ai_router = create_ai_router(app.state.store)
     app.include_router(ai_router)
+    
+    # Add Security router
+    security_router = create_security_router(app.state.key_manager)
+    app.include_router(security_router)
+    
+    # Add SQL/DuckDB router
+    sql_router = create_sql_router(app.state.store)
+    app.include_router(sql_router)
     
     # ==========================================================================
     # Health & Info

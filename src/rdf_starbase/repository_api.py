@@ -109,15 +109,26 @@ PROV_SOURCE_PREDICATES = {
     "http://www.w3.org/ns/prov#wasDerivedFrom",
     "http://www.w3.org/ns/prov#wasAttributedTo",
     "http://www.w3.org/ns/prov#hadPrimarySource",
+    # RDF-StarBase native predicates
+    "<http://rdf-starbase.dev/source>",
+    "http://rdf-starbase.dev/source",
 }
 PROV_PROCESS_PREDICATES = {
     "http://www.w3.org/ns/prov#wasGeneratedBy",
+    "<http://rdf-starbase.dev/process>",
+    "http://rdf-starbase.dev/process",
 }
 PROV_CONFIDENCE_PREDICATES = {
     "http://www.w3.org/ns/prov#value",
+    "<http://rdf-starbase.dev/confidence>",
+    "http://rdf-starbase.dev/confidence",
 }
 PROV_TIMESTAMP_PREDICATES = {
     "http://www.w3.org/ns/prov#generatedAtTime",
+    "<http://rdf-starbase.dev/recordedAt>",
+    "http://rdf-starbase.dev/recordedAt",
+    "<http://rdf-starbase.dev/asOf>",
+    "http://rdf-starbase.dev/asOf",
 }
 
 
@@ -529,11 +540,22 @@ def create_repository_router(
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         
+        raw_stats = store.stats()
+        
+        # Flatten and provide friendly names for UI consumption
         return {
             "name": name,
             "description": info.description,
             "created_at": info.created_at.isoformat(),
-            "stats": store.stats(),
+            # Primary stats with UI-friendly names
+            "triple_count": raw_stats.get("active_assertions", 0),
+            "subject_count": raw_stats.get("unique_subjects", 0),
+            "predicate_count": raw_stats.get("unique_predicates", 0),
+            "object_count": raw_stats.get("term_dict", {}).get("total_terms", 0),
+            "graph_count": raw_stats.get("fact_store", {}).get("graphs", 0),
+            "source_count": raw_stats.get("unique_sources", 0),
+            # Detailed stats for advanced views
+            "details": raw_stats,
         }
     
     # =========================================================================
@@ -670,6 +692,8 @@ def create_repository_router(
                 "message": f"Imported {count} triples from {format_type} data" + (f" into graph <{target_graph}>" if target_graph else " into default graph")
             }
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
     
     @router.post("/{name}/upload")
@@ -898,8 +922,11 @@ def create_repository_router(
         - SELECT * FROM triples LIMIT 10
         - SELECT predicate, COUNT(*) as count FROM triples GROUP BY predicate ORDER BY count DESC
         - SELECT subject, object FROM triples WHERE predicate LIKE '%type%'
+        
+        Performance note: Uses cached DuckDB interface for connection reuse.
+        Queries on 'facts' and 'terms' tables are fastest (no string materialization).
         """
-        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        from rdf_starbase.storage.duckdb import get_cached_interface, check_duckdb_available
         
         if not check_duckdb_available():
             raise HTTPException(
@@ -913,15 +940,16 @@ def create_repository_router(
             raise HTTPException(status_code=404, detail=str(e))
         
         try:
-            with DuckDBInterface(store, read_only=True) as sql:
-                result = sql.execute(request.sql, limit=request.limit)
-                return {
-                    "columns": result.columns,
-                    "rows": result.rows,
-                    "row_count": result.row_count,
-                    "execution_time_ms": result.execution_time_ms,
-                    "warnings": result.warnings,
-                }
+            # Use cached interface for connection reuse
+            sql = get_cached_interface(store, read_only=True)
+            result = sql.execute(request.sql, limit=request.limit)
+            return {
+                "columns": result.columns,
+                "rows": result.rows,
+                "row_count": result.row_count,
+                "execution_time_ms": result.execution_time_ms,
+                "warnings": result.warnings,
+            }
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
@@ -930,7 +958,7 @@ def create_repository_router(
     @router.get("/{name}/sql/tables")
     async def sql_list_tables(name: str):
         """List all available SQL tables and views."""
-        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        from rdf_starbase.storage.duckdb import get_cached_interface, check_duckdb_available
         
         if not check_duckdb_available():
             raise HTTPException(
@@ -943,23 +971,23 @@ def create_repository_router(
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         
-        with DuckDBInterface(store, read_only=True) as sql:
-            tables = sql.list_tables()
-            return {
-                "tables": [
-                    {
-                        "name": t.name,
-                        "columns": t.columns,
-                        "row_count": t.row_count,
-                    }
-                    for t in tables
-                ]
-            }
+        sql = get_cached_interface(store, read_only=True)
+        tables = sql.list_tables()
+        return {
+            "tables": [
+                {
+                    "name": t.name,
+                    "columns": t.columns,
+                    "row_count": t.row_count,
+                }
+                for t in tables
+            ]
+        }
     
     @router.get("/{name}/sql/schema/{table_name}")
     async def sql_table_schema(name: str, table_name: str):
         """Get the schema (column types) for a table."""
-        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        from rdf_starbase.storage.duckdb import get_cached_interface, check_duckdb_available
         
         if not check_duckdb_available():
             raise HTTPException(
@@ -973,12 +1001,12 @@ def create_repository_router(
             raise HTTPException(status_code=404, detail=str(e))
         
         try:
-            with DuckDBInterface(store, read_only=True) as sql:
-                schema = sql.get_schema(table_name)
-                return {
-                    "table": table_name,
-                    "columns": schema,
-                }
+            sql = get_cached_interface(store, read_only=True)
+            schema = sql.get_schema(table_name)
+            return {
+                "table": table_name,
+                "columns": schema,
+            }
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
     
@@ -989,7 +1017,7 @@ def create_repository_router(
         n: int = Query(default=10, ge=1, le=1000),
     ):
         """Get a sample of rows from a table."""
-        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        from rdf_starbase.storage.duckdb import get_cached_interface, check_duckdb_available
         
         if not check_duckdb_available():
             raise HTTPException(
@@ -1003,14 +1031,14 @@ def create_repository_router(
             raise HTTPException(status_code=404, detail=str(e))
         
         try:
-            with DuckDBInterface(store, read_only=True) as sql:
-                result = sql.sample(table_name, n)
-                return {
-                    "table": table_name,
-                    "columns": result.columns,
-                    "rows": result.rows,
-                    "sample_size": result.row_count,
-                }
+            sql = get_cached_interface(store, read_only=True)
+            result = sql.sample(table_name, n)
+            return {
+                "table": table_name,
+                "columns": result.columns,
+                "rows": result.rows,
+                "sample_size": result.row_count,
+            }
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
     
@@ -1030,7 +1058,7 @@ def create_repository_router(
             "limit": 10
         }
         """
-        from rdf_starbase.storage.duckdb import DuckDBInterface, check_duckdb_available
+        from rdf_starbase.storage.duckdb import get_cached_interface, check_duckdb_available
         
         if not check_duckdb_available():
             raise HTTPException(
@@ -1044,21 +1072,21 @@ def create_repository_router(
             raise HTTPException(status_code=404, detail=str(e))
         
         try:
-            with DuckDBInterface(store, read_only=True) as sql:
-                result = sql.aggregate(
-                    group_by=request.group_by,
-                    aggregations=request.aggregations,
-                    table=request.table,
-                    where=request.where,
-                    order_by=request.order_by,
-                    limit=request.limit,
-                )
-                return {
-                    "columns": result.columns,
-                    "rows": result.rows,
-                    "row_count": result.row_count,
-                    "execution_time_ms": result.execution_time_ms,
-                }
+            sql = get_cached_interface(store, read_only=True)
+            result = sql.aggregate(
+                group_by=request.group_by,
+                aggregations=request.aggregations,
+                table=request.table,
+                where=request.where,
+                order_by=request.order_by,
+                limit=request.limit,
+            )
+            return {
+                "columns": result.columns,
+                "rows": result.rows,
+                "row_count": result.row_count,
+                "execution_time_ms": result.execution_time_ms,
+            }
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
