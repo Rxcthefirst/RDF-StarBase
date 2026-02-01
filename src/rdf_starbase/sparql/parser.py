@@ -20,7 +20,7 @@ from rdf_starbase.sparql.ast import (
     DeleteWhereQuery, ModifyQuery,
     DescribeQuery, ConstructQuery,
     TriplePattern, QuotedTriplePattern,
-    OptionalPattern, UnionPattern, GraphPattern, MinusPattern,
+    OptionalPattern, UnionPattern, GraphPattern, MinusPattern, ServicePattern,
     Variable, IRI, Literal, BlankNode,
     Filter, Comparison, LogicalExpression, FunctionCall,
     AggregateExpression, Bind, ValuesClause,
@@ -133,6 +133,7 @@ class SPARQLStarParser:
         MINUS = CaselessKeyword("MINUS")
         DESCRIBE = CaselessKeyword("DESCRIBE")
         CONSTRUCT = CaselessKeyword("CONSTRUCT")
+        SERVICE = CaselessKeyword("SERVICE")
         
         # GROUP BY and HAVING keywords
         GROUP = CaselessKeyword("GROUP")
@@ -440,17 +441,41 @@ class SPARQLStarParser:
             iri + (PATH_STAR | PATH_PLUS | PATH_QUESTION)
         ).set_parse_action(make_path_mod)
         
-        # A path element: inverse, negated, fixed-length, modified IRI, or grouped
-        path_element = path_inverse | path_negated | path_iri_fixed | path_iri_modified | path_group
+        # Support 'a' keyword with path modifiers (a*, a+, a?)
+        def make_path_mod_a(tokens):
+            # 'a' expands to rdf:type
+            path = PathIRI(iri=IRI(RDF_TYPE_IRI))
+            mod_str = tokens[1]
+            if mod_str == "*":
+                return PathMod(path=path, modifier=PropertyPathModifier.ZERO_OR_MORE)
+            elif mod_str == "+":
+                return PathMod(path=path, modifier=PropertyPathModifier.ONE_OR_MORE)
+            elif mod_str == "?":
+                return PathMod(path=path, modifier=PropertyPathModifier.ZERO_OR_ONE)
+            return path
         
-        # A path step (for sequences): path element or plain IRI
+        path_a_modified = (
+            a_keyword + (PATH_STAR | PATH_PLUS | PATH_QUESTION)
+        ).set_parse_action(make_path_mod_a)
+        
+        # A path element: inverse, negated, fixed-length, modified IRI, 'a' modified, or grouped
+        path_element = path_inverse | path_negated | path_iri_fixed | path_iri_modified | path_a_modified | path_group
+        
+        # Wrap 'a' keyword in a path step
+        def wrap_a_path_step(tokens):
+            return PathIRI(iri=IRI(RDF_TYPE_IRI))
+        
+        # A path step (for sequences): path element, plain IRI, or 'a' keyword
         def wrap_path_step(tokens):
             t = tokens[0]
             if isinstance(t, IRI):
                 return make_path_iri(t)
             return t
         
-        path_step = (path_element | iri.copy().set_parse_action(wrap_path_step))
+        # 'a' wrapped as a path step
+        a_path_step = a_keyword.copy().set_parse_action(wrap_a_path_step)
+        
+        path_step = (path_element | iri.copy().set_parse_action(wrap_path_step) | a_path_step)
         
         # Sequence path: path1/path2/... (requires at least one /)
         def make_path_sequence(tokens):
@@ -481,8 +506,8 @@ class SPARQLStarParser:
         # Complete path expression
         path_expression <<= path_alternative | path_atomic
         
-        # Predicate: try 'a' keyword, path expression, or term
-        predicate_path = a_keyword | path_expression | term
+        # Predicate: try path expression first (includes 'a' in paths), then 'a' keyword alone, then term
+        predicate_path = path_expression | a_keyword | term
         
         # =================================================================
         # Triple Patterns (with property list and object list support)
@@ -843,6 +868,40 @@ class SPARQLStarParser:
         ).set_parse_action(make_minus)
         
         # =================================================================
+        # SERVICE Pattern (Federated Query)
+        # =================================================================
+        
+        def make_service(tokens):
+            """Create a SERVICE pattern for federated queries."""
+            silent = False
+            endpoint = None
+            patterns = []
+            filters = []
+            
+            for token in tokens:
+                if token == "SILENT":
+                    silent = True
+                elif isinstance(token, IRI):
+                    endpoint = token
+                elif isinstance(token, (TriplePattern, QuotedTriplePattern)):
+                    patterns.append(token)
+                elif isinstance(token, list):
+                    for item in token:
+                        if isinstance(item, (TriplePattern, QuotedTriplePattern)):
+                            patterns.append(item)
+                elif isinstance(token, Filter):
+                    filters.append(token)
+            
+            return ServicePattern(endpoint=endpoint, patterns=patterns, filters=filters, silent=silent)
+        
+        service_pattern = (
+            Suppress(SERVICE) + 
+            Opt(SILENT.set_parse_action(lambda: "SILENT")) +
+            iri + 
+            LBRACE + ZeroOrMore(triple_pattern | filter_clause) + RBRACE
+        ).set_parse_action(make_service)
+        
+        # =================================================================
         # EXISTS / NOT EXISTS Filter
         # =================================================================
         
@@ -988,7 +1047,7 @@ class SPARQLStarParser:
         # WHERE Clause
         # =================================================================
         
-        where_pattern = triple_pattern | not_exists_filter | exists_filter | filter_clause | optional_pattern | union_pattern | minus_pattern | bind_clause | values_clause | graph_pattern | subselect_pattern
+        where_pattern = triple_pattern | not_exists_filter | exists_filter | filter_clause | optional_pattern | union_pattern | minus_pattern | bind_clause | values_clause | graph_pattern | subselect_pattern | service_pattern
         
         def make_where_clause(tokens):
             patterns = []
@@ -1000,6 +1059,7 @@ class SPARQLStarParser:
             values = None
             graph_patterns = []
             subselects = []
+            service_patterns = []
             for token in tokens:
                 if isinstance(token, (TriplePattern, QuotedTriplePattern)):
                     patterns.append(token)
@@ -1024,6 +1084,8 @@ class SPARQLStarParser:
                     graph_patterns.append(token)
                 elif isinstance(token, SubSelect):
                     subselects.append(token)
+                elif isinstance(token, ServicePattern):
+                    service_patterns.append(token)
             return WhereClause(
                 patterns=patterns, 
                 filters=filters, 
@@ -1033,7 +1095,8 @@ class SPARQLStarParser:
                 binds=binds,
                 values=values,
                 graph_patterns=graph_patterns,
-                subselects=subselects
+                subselects=subselects,
+                service_patterns=service_patterns
             )
         
         # WHERE clause with optional WHERE keyword (for ASK queries)
@@ -1114,8 +1177,19 @@ class SPARQLStarParser:
             LPAREN + aggregate_expr + Suppress(AS) + select_variable + RPAREN
         ).set_parse_action(make_aggregate_with_alias)
         
-        # Select expression: variable or (aggregate AS ?alias)
-        select_expr = aliased_aggregate | aggregate_expr | select_variable
+        # Function call with alias: (DATATYPE(?v) AS ?dt), (IF(...) AS ?result)
+        def make_function_with_alias(tokens):
+            func = tokens[0]
+            if len(tokens) > 1 and isinstance(tokens[1], Variable):
+                func.alias = tokens[1]
+            return func
+        
+        aliased_function = (
+            LPAREN + function_call + Suppress(AS) + select_variable + RPAREN
+        ).set_parse_action(make_function_with_alias)
+        
+        # Select expression: variable, (aggregate AS ?alias), or (function AS ?alias)
+        select_expr = aliased_aggregate | aliased_function | aggregate_expr | select_variable
         
         # Variable list or *
         def make_star(tokens):
@@ -1509,28 +1583,96 @@ class SPARQLStarParser:
             ground_term + ground_term + ground_term + Opt(DOT)
         ).set_parse_action(make_ground_triple)
         
-        # INSERT DATA { triples } - supports full Turtle syntax
-        def make_insert_data_query(tokens):
-            prefixes = {}
+        # Named graph block for quad patterns: GRAPH <uri> { triples }
+        GRAPH_KW = Keyword("GRAPH", caseless=True)
+        
+        # Store graph blocks as tuples (graph_iri, triples_list)
+        def make_graph_block(tokens):
+            # tokens[0] is the graph IRI, tokens[1:] are the triples
+            graph_iri = tokens[0]
             triples = []
-            graph = None
-            
-            for token in tokens:
-                if isinstance(token, tuple) and len(token) == 2 and isinstance(token[0], str):
-                    prefixes[token[0]] = token[1]
-                elif isinstance(token, TriplePattern):
-                    triples.append(token)
-                elif isinstance(token, IRI):
-                    graph = token
-                elif isinstance(token, list) or isinstance(token, pp.ParseResults):
-                    for item in token:
+            for t in tokens[1:]:
+                if isinstance(t, TriplePattern):
+                    triples.append(t)
+                elif isinstance(t, (list, pp.ParseResults)):
+                    for item in t:
                         if isinstance(item, TriplePattern):
                             triples.append(item)
-            
-            return InsertDataQuery(prefixes=prefixes, triples=triples, graph=graph)
+            return ("GRAPH_BLOCK", graph_iri, triples)
         
-        # Use turtle_triples for full Turtle syntax support
-        insert_data_body = LBRACE + turtle_triples + RBRACE
+        graph_block = (
+            Suppress(GRAPH_KW) + turtle_iri + 
+            LBRACE + turtle_triples + RBRACE
+        ).set_parse_action(make_graph_block)
+        
+        # Quad data: mix of GRAPH blocks and default graph triples
+        # We need to parse both interleaved, but turtle_triples is greedy
+        # Solution: wrap default triples as DEFAULT_BLOCK for uniform handling
+        def make_default_block(tokens):
+            """Wrap default graph triples in a block tuple."""
+            triples = []
+            for t in tokens:
+                if isinstance(t, TriplePattern):
+                    triples.append(t)
+                elif isinstance(t, (list, pp.ParseResults)):
+                    for item in t:
+                        if isinstance(item, TriplePattern):
+                            triples.append(item)
+            if triples:
+                return ("DEFAULT_BLOCK", triples)
+            return None
+        
+        # Parse quad data: sequence of GRAPH blocks (each block is self-contained)
+        # For default triples only (no GRAPH blocks), we still use turtle_triples
+        quad_data_with_graphs = ZeroOrMore(graph_block)
+        
+        # INSERT DATA { quad patterns } - supports GRAPH blocks and default graph triples
+        def make_insert_data_query(tokens):
+            prefixes = {}
+            default_triples = []
+            quad_patterns = {}
+            
+            for token in tokens:
+                if isinstance(token, tuple):
+                    if len(token) == 2 and isinstance(token[0], str) and isinstance(token[1], str):
+                        # Prefix declaration
+                        prefixes[token[0]] = token[1]
+                    elif len(token) == 3 and token[0] == "GRAPH_BLOCK":
+                        # Named graph block
+                        graph_uri = token[1].value if isinstance(token[1], IRI) else str(token[1])
+                        graph_triples = token[2]
+                        if graph_uri not in quad_patterns:
+                            quad_patterns[graph_uri] = []
+                        quad_patterns[graph_uri].extend(graph_triples)
+                elif isinstance(token, TriplePattern):
+                    default_triples.append(token)
+                elif isinstance(token, (list, pp.ParseResults)):
+                    for item in token:
+                        if isinstance(item, tuple) and len(item) == 3 and item[0] == "GRAPH_BLOCK":
+                            # Named graph block
+                            graph_uri = item[1].value if isinstance(item[1], IRI) else str(item[1])
+                            graph_triples = item[2]
+                            if graph_uri not in quad_patterns:
+                                quad_patterns[graph_uri] = []
+                            quad_patterns[graph_uri].extend(graph_triples)
+                        elif isinstance(item, TriplePattern):
+                            default_triples.append(item)
+            
+            return InsertDataQuery(
+                prefixes=prefixes, 
+                triples=default_triples, 
+                quad_patterns=quad_patterns,
+            )
+        
+        # Quad data body content: mix of default graph triple blocks and GRAPH blocks
+        # This produces a flat list of items where each item is either:
+        # - A TriplePattern (default graph)
+        # - A ("GRAPH_BLOCK", iri, [triples]) tuple (named graph)
+        
+        # Use ^ (longest match) so turtle_triples is tried when no GRAPH blocks
+        quad_content = (ZeroOrMore(graph_block) ^ turtle_triples)
+        
+        insert_data_body = LBRACE + quad_content + RBRACE
         
         insert_data_query = (
             ZeroOrMore(prefix_decl) +
@@ -1731,27 +1873,34 @@ class SPARQLStarParser:
         
         # CREATE [SILENT] GRAPH <uri>
         def make_create_graph(tokens):
+            prefixes = {}
             silent = False
             graph_uri = None
             for token in tokens:
-                if token == "SILENT":
+                if isinstance(token, tuple) and len(token) == 2 and isinstance(token[0], str):
+                    prefixes[token[0]] = token[1]
+                elif token == "SILENT":
                     silent = True
                 elif isinstance(token, IRI):
                     graph_uri = token
-            return CreateGraphQuery(prefixes={}, graph_uri=graph_uri, silent=silent)
+            return CreateGraphQuery(prefixes=prefixes, graph_uri=graph_uri, silent=silent)
         
         create_graph_query = (
+            ZeroOrMore(prefix_decl) +
             Suppress(CREATE) + Opt(SILENT.set_parse_action(lambda: "SILENT")) +
             Suppress(GRAPH) + iri
         ).set_parse_action(make_create_graph)
         
         # DROP [SILENT] (GRAPH <uri> | DEFAULT | NAMED | ALL)
         def make_drop_graph(tokens):
+            prefixes = {}
             silent = False
             graph_uri = None
             target = "graph"
             for token in tokens:
-                if token == "SILENT":
+                if isinstance(token, tuple) and len(token) == 2 and isinstance(token[0], str):
+                    prefixes[token[0]] = token[1]
+                elif token == "SILENT":
                     silent = True
                 elif token == "DEFAULT":
                     target = "default"
@@ -1761,7 +1910,7 @@ class SPARQLStarParser:
                     target = "all"
                 elif isinstance(token, IRI):
                     graph_uri = token
-            return DropGraphQuery(prefixes={}, graph_uri=graph_uri, target=target, silent=silent)
+            return DropGraphQuery(prefixes=prefixes, graph_uri=graph_uri, target=target, silent=silent)
         
         drop_target = (
             (Suppress(GRAPH) + iri) |
@@ -1770,16 +1919,20 @@ class SPARQLStarParser:
             ALL.set_parse_action(lambda: "ALL")
         )
         drop_graph_query = (
+            ZeroOrMore(prefix_decl) +
             Suppress(DROP) + Opt(SILENT.set_parse_action(lambda: "SILENT")) + drop_target
         ).set_parse_action(make_drop_graph)
         
         # CLEAR [SILENT] (GRAPH <uri> | DEFAULT | NAMED | ALL)
         def make_clear_graph(tokens):
+            prefixes = {}
             silent = False
             graph_uri = None
             target = "graph"
             for token in tokens:
-                if token == "SILENT":
+                if isinstance(token, tuple) and len(token) == 2 and isinstance(token[0], str):
+                    prefixes[token[0]] = token[1]
+                elif token == "SILENT":
                     silent = True
                 elif token == "DEFAULT":
                     target = "default"
@@ -1789,28 +1942,33 @@ class SPARQLStarParser:
                     target = "all"
                 elif isinstance(token, IRI):
                     graph_uri = token
-            return ClearGraphQuery(prefixes={}, graph_uri=graph_uri, target=target, silent=silent)
+            return ClearGraphQuery(prefixes=prefixes, graph_uri=graph_uri, target=target, silent=silent)
         
         clear_graph_query = (
+            ZeroOrMore(prefix_decl) +
             Suppress(CLEAR) + Opt(SILENT.set_parse_action(lambda: "SILENT")) + drop_target
         ).set_parse_action(make_clear_graph)
         
         # LOAD [SILENT] <source> [INTO GRAPH <dest>]
         def make_load(tokens):
+            prefixes = {}
             silent = False
             source_uri = None
             graph_uri = None
             for token in tokens:
-                if token == "SILENT":
+                if isinstance(token, tuple) and len(token) == 2 and isinstance(token[0], str):
+                    prefixes[token[0]] = token[1]
+                elif token == "SILENT":
                     silent = True
                 elif isinstance(token, IRI):
                     if source_uri is None:
                         source_uri = token
                     else:
                         graph_uri = token
-            return LoadQuery(prefixes={}, source_uri=source_uri, graph_uri=graph_uri, silent=silent)
+            return LoadQuery(prefixes=prefixes, source_uri=source_uri, graph_uri=graph_uri, silent=silent)
         
         load_query = (
+            ZeroOrMore(prefix_decl) +
             Suppress(LOAD) + Opt(SILENT.set_parse_action(lambda: "SILENT")) +
             iri + Opt(Suppress(INTO) + Suppress(GRAPH) + iri)
         ).set_parse_action(make_load)
@@ -1818,6 +1976,7 @@ class SPARQLStarParser:
         # COPY/MOVE/ADD [SILENT] (DEFAULT | GRAPH <uri>) TO (DEFAULT | GRAPH <uri>)
         def make_graph_transfer(operation):
             def action(tokens):
+                prefixes = {}
                 silent = False
                 source_graph = None
                 dest_graph = None
@@ -1827,7 +1986,9 @@ class SPARQLStarParser:
                 i = 0
                 while i < len(token_list):
                     token = token_list[i]
-                    if token == "SILENT":
+                    if isinstance(token, tuple) and len(token) == 2 and isinstance(token[0], str):
+                        prefixes[token[0]] = token[1]
+                    elif token == "SILENT":
                         silent = True
                     elif token == "DEFAULT":
                         if source_graph is None and not source_is_default:
@@ -1842,37 +2003,41 @@ class SPARQLStarParser:
                 
                 if operation == "COPY":
                     return CopyGraphQuery(
-                        prefixes={}, source_graph=source_graph, dest_graph=dest_graph,
+                        prefixes=prefixes, source_graph=source_graph, dest_graph=dest_graph,
                         silent=silent, source_is_default=source_is_default
                     )
                 elif operation == "MOVE":
                     return MoveGraphQuery(
-                        prefixes={}, source_graph=source_graph, dest_graph=dest_graph,
+                        prefixes=prefixes, source_graph=source_graph, dest_graph=dest_graph,
                         silent=silent, source_is_default=source_is_default
                     )
                 else:  # ADD
                     return AddGraphQuery(
-                        prefixes={}, source_graph=source_graph, dest_graph=dest_graph,
+                        prefixes=prefixes, source_graph=source_graph, dest_graph=dest_graph,
                         silent=silent, source_is_default=source_is_default
                     )
             return action
         
         graph_ref = (
             DEFAULT.set_parse_action(lambda: "DEFAULT") |
-            (Suppress(GRAPH) + iri)
+            (Suppress(GRAPH) + iri) |
+            iri
         )
         
         copy_query = (
+            ZeroOrMore(prefix_decl) +
             Suppress(COPY) + Opt(SILENT.set_parse_action(lambda: "SILENT")) +
             graph_ref + Suppress(TO) + graph_ref
         ).set_parse_action(make_graph_transfer("COPY"))
         
         move_query = (
+            ZeroOrMore(prefix_decl) +
             Suppress(MOVE) + Opt(SILENT.set_parse_action(lambda: "SILENT")) +
             graph_ref + Suppress(TO) + graph_ref
         ).set_parse_action(make_graph_transfer("MOVE"))
         
         add_query = (
+            ZeroOrMore(prefix_decl) +
             Suppress(ADD) + Opt(SILENT.set_parse_action(lambda: "SILENT")) +
             graph_ref + Suppress(TO) + graph_ref
         ).set_parse_action(make_graph_transfer("ADD"))

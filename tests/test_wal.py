@@ -328,3 +328,153 @@ class TestDeletePayload:
         assert restored.subject_id == 100
         assert restored.predicate_id is None
         assert restored.object_id == 200
+
+
+class TestTripleStoreWALIntegration:
+    """Test WAL integration with TripleStore."""
+    
+    def test_store_without_wal(self):
+        """Test that store works without WAL (backward compatible)."""
+        from rdf_starbase.store import TripleStore
+        
+        store = TripleStore()
+        assert store.has_wal() is False
+        
+        with pytest.raises(RuntimeError, match="WAL not enabled"):
+            store.begin_transaction()
+    
+    def test_store_with_wal_enabled(self):
+        """Test store with WAL enabled."""
+        from rdf_starbase.store import TripleStore
+        
+        wal_dir = Path(tempfile.mkdtemp())
+        try:
+            store = TripleStore(wal_dir=wal_dir)
+            assert store.has_wal() is True
+            
+            # Can begin a transaction
+            txn = store.begin_transaction()
+            assert txn is not None
+            
+            store.close()
+        finally:
+            shutil.rmtree(wal_dir)
+    
+    def test_transactional_insert_single(self):
+        """Test inserting a single triple via transaction."""
+        from rdf_starbase.store import TripleStore
+        
+        wal_dir = Path(tempfile.mkdtemp())
+        try:
+            store = TripleStore(wal_dir=wal_dir)
+            
+            # Start transaction and add triple
+            txn = store.begin_transaction()
+            txn.add_triple(
+                subject="http://ex.com/s",
+                predicate="http://ex.com/p",
+                obj="http://ex.com/o",
+                source="test",
+                confidence=0.9,
+            )
+            txn.commit()
+            
+            # Verify triple is in store
+            assert len(store._fact_store) == 1
+            
+            store.close()
+        finally:
+            shutil.rmtree(wal_dir)
+    
+    def test_transactional_insert_batch(self):
+        """Test inserting batch of triples via transaction (optimized path)."""
+        from rdf_starbase.store import TripleStore
+        
+        wal_dir = Path(tempfile.mkdtemp())
+        try:
+            store = TripleStore(wal_dir=wal_dir)
+            
+            # Start transaction and add batch
+            txn = store.begin_transaction()
+            n = txn.add_triples_batch(
+                subjects=["http://ex.com/s1", "http://ex.com/s2", "http://ex.com/s3"],
+                predicates=["http://ex.com/p", "http://ex.com/p", "http://ex.com/p"],
+                objects=["http://ex.com/o1", "http://ex.com/o2", "http://ex.com/o3"],
+                source="batch_test",
+                confidence=0.95,
+            )
+            assert n == 3
+            txn.commit()
+            
+            # Verify triples are in store
+            assert len(store._fact_store) == 3
+            
+            store.close()
+        finally:
+            shutil.rmtree(wal_dir)
+    
+    def test_transaction_rollback(self):
+        """Test that rollback discards changes."""
+        from rdf_starbase.store import TripleStore
+        
+        wal_dir = Path(tempfile.mkdtemp())
+        try:
+            store = TripleStore(wal_dir=wal_dir)
+            
+            # Add and rollback
+            txn = store.begin_transaction()
+            txn.add_triple(
+                subject="http://ex.com/s",
+                predicate="http://ex.com/p",
+                obj="http://ex.com/o",
+            )
+            txn.rollback()
+            
+            # Store should be empty
+            assert len(store._fact_store) == 0
+            
+            store.close()
+        finally:
+            shutil.rmtree(wal_dir)
+    
+    def test_transaction_context_manager(self):
+        """Test transaction as context manager."""
+        from rdf_starbase.store import TripleStore
+        
+        wal_dir = Path(tempfile.mkdtemp())
+        try:
+            store = TripleStore(wal_dir=wal_dir)
+            
+            # Use context manager
+            with store.begin_transaction() as txn:
+                txn.add_triple(
+                    subject="http://ex.com/s",
+                    predicate="http://ex.com/p",
+                    obj="value",
+                )
+            
+            # Should be committed
+            assert len(store._fact_store) == 1
+            
+            store.close()
+        finally:
+            shutil.rmtree(wal_dir)
+    
+    def test_checkpoint(self):
+        """Test checkpoint functionality."""
+        from rdf_starbase.store import TripleStore
+        
+        wal_dir = Path(tempfile.mkdtemp())
+        try:
+            store = TripleStore(wal_dir=wal_dir)
+            
+            # Add some data
+            with store.begin_transaction() as txn:
+                txn.add_triple("http://ex.com/s", "http://ex.com/p", "obj")
+            
+            # Checkpoint should not raise
+            store.checkpoint()
+            
+            store.close()
+        finally:
+            shutil.rmtree(wal_dir)

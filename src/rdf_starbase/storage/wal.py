@@ -45,12 +45,13 @@ import polars as pl
 
 class WALEntryType(IntEnum):
     """Types of WAL entries."""
-    INSERT = 1          # Insert triple(s)
+    INSERT = 1          # Insert single triple
     DELETE = 2          # Delete triple(s)
     CHECKPOINT = 3      # Checkpoint marker
     TXN_BEGIN = 4       # Transaction start
     TXN_COMMIT = 5      # Transaction commit
     TXN_ABORT = 6       # Transaction abort/rollback
+    BATCH_INSERT = 7    # Batch insert (columnar)
 
 
 @dataclass
@@ -194,6 +195,54 @@ class DeletePayload:
             p if p != cls.SENTINEL else None,
             o if o != cls.SENTINEL else None,
         )
+
+
+@dataclass
+class BatchInsertPayload:
+    """Payload for batch INSERT entries (columnar format)."""
+    graph_ids: List[int]
+    subject_ids: List[int]
+    predicate_ids: List[int]
+    object_ids: List[int]
+    flags: int
+    source_id: int
+    confidence: float
+    process_id: int
+    
+    def serialize(self) -> bytes:
+        """Serialize batch to bytes."""
+        n = len(self.subject_ids)
+        # Header: count(8) + flags(2) + source(8) + confidence(8) + process(8)
+        header = struct.pack("<QHQdQ", n, self.flags, self.source_id, self.confidence, self.process_id)
+        # Column data: n * 4 uint64s (g, s, p, o)
+        col_format = f"<{n}Q"
+        g_data = struct.pack(col_format, *self.graph_ids)
+        s_data = struct.pack(col_format, *self.subject_ids)
+        p_data = struct.pack(col_format, *self.predicate_ids)
+        o_data = struct.pack(col_format, *self.object_ids)
+        return header + g_data + s_data + p_data + o_data
+    
+    @classmethod
+    def deserialize(cls, data: bytes) -> "BatchInsertPayload":
+        """Deserialize batch from bytes."""
+        # Read header
+        header_size = struct.calcsize("<QHQdQ")
+        n, flags, source_id, confidence, process_id = struct.unpack("<QHQdQ", data[:header_size])
+        
+        # Read columns
+        col_format = f"<{n}Q"
+        col_size = struct.calcsize(col_format)
+        offset = header_size
+        
+        g_ids = list(struct.unpack(col_format, data[offset:offset+col_size]))
+        offset += col_size
+        s_ids = list(struct.unpack(col_format, data[offset:offset+col_size]))
+        offset += col_size
+        p_ids = list(struct.unpack(col_format, data[offset:offset+col_size]))
+        offset += col_size
+        o_ids = list(struct.unpack(col_format, data[offset:offset+col_size]))
+        
+        return cls(g_ids, s_ids, p_ids, o_ids, flags, source_id, confidence, process_id)
 
 
 @dataclass
@@ -460,6 +509,52 @@ class WriteAheadLog:
             self._write_entry(entry)
             return self._sequence
     
+    def log_batch_insert(
+        self,
+        graph_ids: List[int],
+        subject_ids: List[int],
+        predicate_ids: List[int],
+        object_ids: List[int],
+        flags: int = 0,
+        source_id: int = 0,
+        confidence: float = 1.0,
+        process_id: int = 0,
+        txn_id: Optional[int] = None,
+    ) -> int:
+        """
+        Log a batch insert operation (columnar format).
+        
+        More efficient than multiple log_insert calls for bulk ingestion.
+        Single WAL entry for entire batch.
+        
+        Returns:
+            Sequence number of the logged entry
+        """
+        with self._lock:
+            self._sequence += 1
+            
+            payload = BatchInsertPayload(
+                graph_ids=graph_ids,
+                subject_ids=subject_ids,
+                predicate_ids=predicate_ids,
+                object_ids=object_ids,
+                flags=flags,
+                source_id=source_id,
+                confidence=confidence,
+                process_id=process_id,
+            )
+            
+            entry = WALEntry(
+                entry_type=WALEntryType.BATCH_INSERT,
+                sequence_number=self._sequence,
+                transaction_id=txn_id or self._active_txn or 0,
+                timestamp=self._now_micros(),
+                payload=payload.serialize(),
+            )
+            
+            self._write_entry(entry)
+            return self._sequence
+
     def begin_transaction(self) -> int:
         """
         Begin a new transaction.

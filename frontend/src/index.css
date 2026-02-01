@@ -1081,6 +1081,20 @@ html, body, #root {
   box-shadow: var(--shadow-lg);
 }
 
+.modal.import-modal {
+  max-width: 600px;
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal.import-modal .modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
 .modal-header {
   display: flex;
   align-items: center;

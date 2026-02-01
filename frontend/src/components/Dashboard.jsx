@@ -414,8 +414,8 @@ ORDER BY ?person DESC(?confidence)`,
               description="Load Turtle, JSON-LD, RDF/XML, or TriG files"
               disabled={!hasRepo}
               completed={hasData}
-              action={hasRepo && !hasData ? (onOpenImport || onNavigateToWorkbench) : undefined}
-              actionLabel="Import"
+              action={hasRepo ? onOpenImport : undefined}
+              actionLabel={hasData ? "Add More" : "Import"}
             />
             
             <WorkflowStep

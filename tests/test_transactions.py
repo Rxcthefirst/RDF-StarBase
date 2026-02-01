@@ -79,8 +79,7 @@ class TestTransaction:
         """Test explicit rollback."""
         store, txn_mgr = store_with_txn
         
-        txn = txn_mgr.begin()
-        txn.begin()
+        txn = txn_mgr.begin()  # Already active after begin()
         txn.add_triple(
             "http://example.org/alice",
             "http://example.org/knows",
@@ -358,8 +357,7 @@ class TestAtomicity:
             sync_mode="off",
         )
         
-        txn = txn_mgr.begin()
-        txn.begin()
+        txn = txn_mgr.begin()  # Already active after begin()
         txn.add_triple("http://s", "http://p", "http://o", source="test")
         txn.commit()
         

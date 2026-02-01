@@ -361,6 +361,7 @@ function App() {
   const [repositories, setRepositories] = useState([])
   const [currentRepo, setCurrentRepo] = useState(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showImportModal, setShowImportModal] = useState(false)
   const [stats, setStats] = useState(null)
   
   // Query state
@@ -1007,6 +1008,31 @@ function App() {
         theme={theme}
       />
 
+      {/* Import Modal */}
+      {showImportModal && (
+        <div className="modal-overlay" onClick={() => setShowImportModal(false)}>
+          <div className="modal import-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Import Data</h2>
+              <button className="close-btn" onClick={() => setShowImportModal(false)}>
+                <CloseIcon size={20} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <ImportExport
+                repositoryName={currentRepo}
+                onDataChanged={() => {
+                  loadStats(currentRepo)
+                  loadRepositories()
+                  setShowImportModal(false)
+                }}
+                theme={theme}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="app-header">
         <div className="header-left">
@@ -1106,10 +1132,7 @@ function App() {
             onCreateRepo={() => setShowCreateModal(true)}
             onSelectRepo={setCurrentRepo}
             onRefreshRepos={loadRepositories}
-            onOpenImport={() => {
-              setActiveTab('workbench')
-              setSidePanel('import')
-            }}
+            onOpenImport={() => setShowImportModal(true)}
             theme={theme}
           />
         ) : activeTab === 'security' ? (

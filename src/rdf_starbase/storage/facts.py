@@ -291,19 +291,20 @@ class FactStore:
         txn = self._allocate_txn()
         t_added = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
         
-        # Build DataFrame directly from columns (no Python loop)
+        # Build DataFrame directly from columns (no Python loop for repeated values)
         new_df = pl.DataFrame({
             "g": pl.Series(g_col, dtype=pl.UInt64),
             "s": pl.Series(s_col, dtype=pl.UInt64),
             "p": pl.Series(p_col, dtype=pl.UInt64),
             "o": pl.Series(o_col, dtype=pl.UInt64),
-            "flags": pl.Series([int(flags)] * n, dtype=pl.UInt16),
-            "txn": pl.Series([txn] * n, dtype=pl.UInt64),
-            "t_added": pl.Series([t_added] * n, dtype=pl.UInt64),
-            "source": pl.Series([source if source else 0] * n, dtype=pl.UInt64),
-            "confidence": pl.Series([confidence] * n, dtype=pl.Float64),
-            "process": pl.Series([process if process else 0] * n, dtype=pl.UInt64),
-        })
+        }).with_columns([
+            pl.lit(int(flags)).cast(pl.UInt16).alias("flags"),
+            pl.lit(txn).cast(pl.UInt64).alias("txn"),
+            pl.lit(t_added).cast(pl.UInt64).alias("t_added"),
+            pl.lit(source if source else 0).cast(pl.UInt64).alias("source"),
+            pl.lit(confidence).alias("confidence"),
+            pl.lit(process if process else 0).cast(pl.UInt64).alias("process"),
+        ])
         
         self._df = pl.concat([self._df, new_df], how="vertical")
         return txn

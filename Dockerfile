@@ -45,8 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-# Install the package with all dependencies (including web and query)
-RUN pip install --no-cache-dir -e ".[dev,web,query]"
+# Install the package with all dependencies (including web, query, and sql for DuckDB)
+RUN pip install --no-cache-dir -e ".[dev,web,query,sql]"
 
 # Copy built frontend from builder stage
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist

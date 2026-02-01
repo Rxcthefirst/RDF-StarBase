@@ -322,12 +322,15 @@ class LogicalExpression:
 
 @dataclass
 class FunctionCall:
-    """A SPARQL function call (e.g., BOUND(?x), STR(?y))."""
+    """A SPARQL function call (e.g., BOUND(?x), STR(?y), DATATYPE(?v))."""
     name: str
     arguments: list[Union[Variable, Literal, IRI, "FunctionCall"]]
+    alias: Optional["Variable"] = None  # For SELECT projections: (DATATYPE(?v) AS ?dt)
     
     def __str__(self) -> str:
         args = ", ".join(str(a) for a in self.arguments)
+        if self.alias:
+            return f"({self.name}({args}) AS {self.alias})"
         return f"{self.name}({args})"
 
 
@@ -548,8 +551,35 @@ class MinusPattern:
         return vars
 
 
+@dataclass
+class ServicePattern:
+    """
+    A SERVICE graph pattern for federated queries.
+    
+    SERVICE <endpoint> { ?s ?p ?o }
+    SERVICE SILENT <endpoint> { ?s ?p ?o }
+    
+    Executes the inner pattern against a remote SPARQL endpoint.
+    """
+    endpoint: IRI
+    patterns: list[Union[TriplePattern, QuotedTriplePattern]] = field(default_factory=list)
+    filters: list[Filter] = field(default_factory=list)
+    silent: bool = False  # If SILENT, errors from service are ignored
+    
+    def __str__(self) -> str:
+        silent_str = "SILENT " if self.silent else ""
+        inner = " ".join(str(p) for p in self.patterns)
+        return f"SERVICE {silent_str}<{self.endpoint.value}> {{ {inner} }}"
+    
+    def get_variables(self) -> set[Variable]:
+        vars = set()
+        for pattern in self.patterns:
+            vars.update(pattern.get_variables())
+        return vars
+
+
 # Type alias for patterns that can appear in WHERE
-WherePattern = Union[TriplePattern, QuotedTriplePattern, OptionalPattern, UnionPattern, GraphPattern, Bind, ValuesClause, MinusPattern, "SubSelect"]
+WherePattern = Union[TriplePattern, QuotedTriplePattern, OptionalPattern, UnionPattern, GraphPattern, Bind, ValuesClause, MinusPattern, ServicePattern, "SubSelect"]
 
 
 # =============================================================================
@@ -568,6 +598,7 @@ class WhereClause:
     values: Optional[ValuesClause] = None
     graph_patterns: list[GraphPattern] = field(default_factory=list)
     subselects: list["SubSelect"] = field(default_factory=list)
+    service_patterns: list["ServicePattern"] = field(default_factory=list)
     
     def get_all_variables(self) -> set[Variable]:
         """Return all variables used in this WHERE clause."""
@@ -747,15 +778,20 @@ class InsertDataQuery(Query):
     """
     An INSERT DATA update operation.
     
+    Supports both simple triple insertion and quad patterns with named graphs:
+    
     INSERT DATA { 
-        <s1> <p1> <o1> .
-        <s2> <p2> "literal" .
+        <s1> <p1> <o1> .                    # default graph
+        GRAPH <g1> { <s2> <p2> <o2> . }     # named graph
+        GRAPH <g2> { <s3> <p3> <o3> . }     # another named graph
     }
     
     Note: INSERT DATA does not allow variables - all terms must be ground.
     """
-    triples: list[TriplePattern] = field(default_factory=list)
-    graph: Optional[IRI] = None  # Optional GRAPH clause
+    triples: list[TriplePattern] = field(default_factory=list)  # default graph
+    graph: Optional[IRI] = None  # Legacy: single graph for all triples
+    # New: support multiple graphs via quad patterns
+    quad_patterns: dict[str, list[TriplePattern]] = field(default_factory=dict)
     
     def __str__(self) -> str:
         parts = []
@@ -763,14 +799,26 @@ class InsertDataQuery(Query):
             parts.append(f"PREFIX {prefix}: <{uri}>")
         
         parts.append("INSERT DATA {")
+        
+        # Default graph triples
         if self.graph:
+            # Legacy single-graph mode
             parts.append(f"  GRAPH <{self.graph.value}> {{")
             for triple in self.triples:
                 parts.append(f"    {triple} .")
             parts.append("  }")
         else:
+            # Default graph triples
             for triple in self.triples:
                 parts.append(f"  {triple} .")
+        
+        # Named graph quad patterns
+        for graph_uri, graph_triples in self.quad_patterns.items():
+            parts.append(f"  GRAPH <{graph_uri}> {{")
+            for triple in graph_triples:
+                parts.append(f"    {triple} .")
+            parts.append("  }")
+        
         parts.append("}")
         return "\n".join(parts)
 
