@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rdf-starbase"
-version = "0.2.0"
+version = "0.3.0"
 description = "A blazingly fast RDF-Star database powered by Polars"
 readme = "README.md"
 requires-python = ">=3.10"

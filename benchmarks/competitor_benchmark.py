@@ -15,16 +15,16 @@ TEST_FILE = "data/sample/data.ttl"
 
 
 def benchmark_rdfstarbase(file_path: str) -> dict:
-    """Benchmark RDF-StarBase with Oxigraph parser."""
+    """Benchmark RDF-StarBase with optimized Oxigraph direct loading."""
     from src.rdf_starbase import TripleStore, execute_sparql
-    from bulk_loader import bulk_load_turtle, OXIGRAPH_AVAILABLE
+    from bulk_loader import bulk_load_turtle_oneshot, OXIGRAPH_AVAILABLE
     
     results = {"system": "RDF-StarBase", "oxigraph_parser": OXIGRAPH_AVAILABLE}
     
-    # Load
+    # Load using ONESHOT path (fastest for files that fit in memory)
     store = TripleStore()
     t0 = time.time()
-    count = bulk_load_turtle(store, file_path, use_oxigraph=True)
+    count = bulk_load_turtle_oneshot(store, file_path)
     t1 = time.time()
     
     results["load_triples"] = count

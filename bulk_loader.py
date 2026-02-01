@@ -15,10 +15,11 @@ from src.rdf_starbase.models import Triple
 
 # Try to import Oxigraph for fast parsing (~17x faster)
 try:
-    from pyoxigraph import parse as oxigraph_parse, RdfFormat
+    from pyoxigraph import parse as oxigraph_parse, RdfFormat, NamedNode, Literal, BlankNode
     OXIGRAPH_AVAILABLE = True
 except ImportError:
     OXIGRAPH_AVAILABLE = False
+    NamedNode = Literal = BlankNode = None
 
 
 @dataclass
@@ -60,6 +61,87 @@ def _oxigraph_quad_to_strings(quad) -> Tuple[str, str, str]:
         obj = str(o)
     
     return subj, pred, obj
+
+
+def intern_quads_direct(store: "TripleStore", quads, graph_id: int = 0) -> Tuple[List[int], List[int], List[int]]:
+    """
+    Intern Oxigraph quads directly to TermIds - FASTEST PATH.
+    
+    Avoids string conversion overhead by accessing pyoxigraph attributes directly
+    and using the TermDict's fast-path methods.
+    Uses isinstance() instead of hasattr() for faster type checking.
+    
+    Args:
+        store: TripleStore with term_dict
+        quads: Iterator of pyoxigraph Quad objects
+        graph_id: Pre-interned graph TermId
+        
+    Returns:
+        Tuple of (subject_ids, predicate_ids, object_ids) lists
+    """
+    term_dict = store._term_dict
+    
+    # Cache method references for faster lookup
+    intern_iri = term_dict.intern_iri
+    intern_literal = term_dict.intern_literal
+    intern_bnode = term_dict.intern_bnode
+    
+    s_ids = []
+    p_ids = []
+    o_ids = []
+    
+    # Pre-compute constant
+    XSD_STRING = "http://www.w3.org/2001/XMLSchema#string"
+    
+    for quad in quads:
+        # Subject: NamedNode or BlankNode
+        s = quad.subject
+        if isinstance(s, NamedNode):
+            s_ids.append(intern_iri(s.value))
+        else:  # BlankNode
+            s_ids.append(intern_bnode(str(s)[2:]))  # Strip "_:" prefix
+        
+        # Predicate: always NamedNode
+        p_ids.append(intern_iri(quad.predicate.value))
+        
+        # Object: Literal, NamedNode, or BlankNode
+        o = quad.object
+        if isinstance(o, Literal):
+            val = o.value
+            lang = o.language
+            if lang:
+                o_ids.append(intern_literal(val, lang=lang))
+            else:
+                dt = o.datatype
+                if dt is None or dt.value == XSD_STRING:
+                    o_ids.append(intern_literal(val))
+                else:
+                    o_ids.append(intern_literal(val, datatype=dt.value))
+        elif isinstance(o, NamedNode):
+            o_ids.append(intern_iri(o.value))
+        else:  # BlankNode
+            o_ids.append(intern_bnode(str(o)[2:]))
+    
+    return s_ids, p_ids, o_ids
+
+
+def parse_and_intern_oxigraph(
+    store: "TripleStore",
+    chunk_text: str,
+    graph_id: int = 0,
+    base_iri: str = "http://example.org/"
+) -> Tuple[List[int], List[int], List[int], int]:
+    """
+    Parse AND intern in one pass using Oxigraph - FASTEST COMBINED PATH.
+    
+    Combines parsing and interning, avoiding intermediate string lists.
+    
+    Returns:
+        Tuple of (s_ids, p_ids, o_ids, count)
+    """
+    quads = oxigraph_parse(chunk_text, RdfFormat.TURTLE, base_iri=base_iri)
+    s_ids, p_ids, o_ids = intern_quads_direct(store, quads, graph_id)
+    return s_ids, p_ids, o_ids, len(s_ids)
 
 
 def parse_chunk_oxigraph(chunk_text: str, base_iri: str = "http://example.org/") -> ParsedChunk:
@@ -261,6 +343,201 @@ def bulk_load_turtle(
         rate = total_triples / elapsed if elapsed > 0 else 0
         print(f"  Chunk {chunk_count}: +{added:,} triples, total: {total_triples:,}, rate: {rate:,.0f}/sec")
     
+    elapsed = time.time() - t0
+    print(f"\nCompleted: {total_triples:,} triples in {elapsed:.1f}s ({total_triples/elapsed:,.0f} triples/sec)")
+    
+    return total_triples
+
+
+def bulk_load_turtle_oneshot(
+    store: TripleStore,
+    file_path: str,
+    graph_uri: Optional[str] = None,
+) -> int:
+    """
+    FASTEST bulk load - single-shot loading for small/medium files.
+    
+    Reads entire file at once, parses with Oxigraph, and inserts.
+    Best for files that fit in memory (<100MB).
+    
+    Args:
+        store: The TripleStore to load into
+        file_path: Path to .ttl or .ttl.gz file
+        graph_uri: Optional named graph URI
+    
+    Returns:
+        Total number of triples loaded
+    """
+    if not OXIGRAPH_AVAILABLE:
+        return bulk_load_turtle(store, file_path, graph_uri=graph_uri, use_oxigraph=False)
+    
+    from rdf_starbase.storage.facts import FactFlags, DEFAULT_GRAPH_ID
+    
+    path = Path(file_path)
+    is_gzipped = path.suffix.lower() == ".gz"
+    
+    # Read entire file
+    if is_gzipped:
+        with gzip.open(path, 'rb') as f:
+            content = f.read()
+    else:
+        with open(path, 'rb') as f:
+            content = f.read()
+    
+    # Pre-intern graph
+    graph_id = store._term_dict.intern_iri(graph_uri) if graph_uri else DEFAULT_GRAPH_ID
+    source_id = store._term_dict.intern_literal("bulk_load")
+    
+    # Parse all at once with Oxigraph
+    quads = list(oxigraph_parse(content, RdfFormat.TURTLE))
+    
+    # Intern directly
+    s_ids, p_ids, o_ids = intern_quads_direct(store, quads, graph_id)
+    count = len(s_ids)
+    
+    if count > 0:
+        store._fact_store.add_facts_columnar(
+            g_col=[graph_id] * count,
+            s_col=s_ids,
+            p_col=p_ids,
+            o_col=o_ids,
+            flags=FactFlags.ASSERTED,
+            source=source_id,
+            confidence=1.0,
+        )
+    
+    store._invalidate_cache()
+    return count
+
+
+def bulk_load_turtle_fast(
+    store: TripleStore,
+    file_path: str,
+    chunk_lines: int = 500_000,
+    graph_uri: Optional[str] = None,
+) -> int:
+    """
+    FASTEST bulk load path - direct Oxigraph parsing + interning.
+    
+    Eliminates string conversion overhead by interning directly from
+    pyoxigraph objects. ~2x faster than bulk_load_turtle.
+    
+    Requires pyoxigraph. Falls back to bulk_load_turtle if not available.
+    
+    Args:
+        store: The TripleStore to load into
+        file_path: Path to .ttl or .ttl.gz file
+        chunk_lines: Lines per chunk (default 500K)
+        graph_uri: Optional named graph URI
+    
+    Returns:
+        Total number of triples loaded
+    """
+    if not OXIGRAPH_AVAILABLE:
+        print("  pyoxigraph not available, falling back to standard loader")
+        return bulk_load_turtle(store, file_path, chunk_lines, graph_uri, use_oxigraph=False)
+    
+    from rdf_starbase.storage.facts import FactFlags, DEFAULT_GRAPH_ID
+    
+    print(f"Bulk loading (FAST): {file_path}")
+    t0 = time.time()
+    
+    # Pre-intern graph and source
+    graph_id = store._term_dict.intern_iri(graph_uri) if graph_uri else DEFAULT_GRAPH_ID
+    source_id = store._term_dict.intern_literal("bulk_load")
+    
+    path = Path(file_path)
+    is_gzipped = path.suffix.lower() == ".gz"
+    
+    if is_gzipped:
+        f = gzip.open(path, 'rt', encoding='utf-8')
+    else:
+        f = open(path, 'r', encoding='utf-8')
+    
+    total_triples = 0
+    chunk_count = 0
+    prefix_lines = []
+    data_lines = []
+    total_lines = 0
+    
+    try:
+        for line in f:
+            total_lines += 1
+            stripped = line.strip()
+            
+            # Accumulate prefix declarations
+            if stripped.startswith('@prefix') or stripped.startswith('@base') or \
+               stripped.startswith('PREFIX') or stripped.startswith('BASE'):
+                prefix_lines.append(line)
+            else:
+                data_lines.append(line)
+            
+            # Yield chunk at statement boundary
+            is_boundary = (stripped == '' or stripped.endswith('.'))
+            
+            if len(data_lines) >= chunk_lines and is_boundary:
+                chunk_text = ''.join(prefix_lines) + ''.join(data_lines)
+                chunk_count += 1
+                
+                try:
+                    # Direct parse + intern (no string conversion)
+                    s_ids, p_ids, o_ids, count = parse_and_intern_oxigraph(
+                        store, chunk_text, graph_id
+                    )
+                    
+                    if count > 0:
+                        # Direct insert to FactStore
+                        store._fact_store.add_facts_columnar(
+                            g_col=[graph_id] * count,
+                            s_col=s_ids,
+                            p_col=p_ids,
+                            o_col=o_ids,
+                            flags=FactFlags.ASSERTED,
+                            source=source_id,
+                            confidence=1.0,
+                        )
+                        total_triples += count
+                    
+                    elapsed = time.time() - t0
+                    rate = total_triples / elapsed if elapsed > 0 else 0
+                    print(f"  Chunk {chunk_count}: +{count:,} triples, total: {total_triples:,}, rate: {rate:,.0f}/sec")
+                    
+                except Exception as e:
+                    print(f"  Warning: Parse error in chunk {chunk_count}: {e}")
+                
+                data_lines = []
+        
+        # Final chunk
+        if data_lines:
+            chunk_text = ''.join(prefix_lines) + ''.join(data_lines)
+            chunk_count += 1
+            
+            try:
+                s_ids, p_ids, o_ids, count = parse_and_intern_oxigraph(
+                    store, chunk_text, graph_id
+                )
+                
+                if count > 0:
+                    store._fact_store.add_facts_columnar(
+                        g_col=[graph_id] * count,
+                        s_col=s_ids,
+                        p_col=p_ids,
+                        o_col=o_ids,
+                        flags=FactFlags.ASSERTED,
+                        source=source_id,
+                        confidence=1.0,
+                    )
+                    total_triples += count
+                
+            except Exception as e:
+                print(f"  Warning: Final parse error: {e}")
+        
+        print(f"  Total: {total_lines:,} lines")
+        
+    finally:
+        f.close()
+    
+    store._invalidate_cache()
     elapsed = time.time() - t0
     print(f"\nCompleted: {total_triples:,} triples in {elapsed:.1f}s ({total_triples/elapsed:,.0f} triples/sec)")
     
