@@ -1,0 +1,990 @@
+/* ============================================================================
+   Starchart — Visual RML Mapper Styles (CSV Workflow)
+   ============================================================================ */
+
+.starchart {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* ============================================================================
+   Header with Step Indicators
+   ============================================================================ */
+
+.starchart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-title h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.header-title .subtitle {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.header-steps {
+  display: flex;
+  gap: 24px;
+}
+
+.header-steps .step {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 4px 0;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.header-steps .step.active {
+  color: var(--accent-color);
+  border-bottom-color: var(--accent-color);
+  font-weight: 500;
+}
+
+.header-steps .step.done {
+  color: var(--success);
+}
+
+/* ============================================================================
+   Main Content Area
+   ============================================================================ */
+
+.starchart-content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+}
+
+/* ============================================================================
+   Step 1: File Upload
+   ============================================================================ */
+
+.upload-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 600px;
+  width: 100%;
+}
+
+.upload-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 48px;
+  border: 2px dashed var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.upload-zone:hover,
+.upload-zone:focus {
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 5%, var(--bg-secondary));
+}
+
+.upload-zone.drag-over {
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 10%, var(--bg-secondary));
+  transform: scale(1.01);
+}
+
+.upload-zone svg {
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+.upload-zone h3 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.upload-zone p {
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.upload-zone .hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+.error-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  color: var(--error);
+  font-size: 14px;
+}
+
+.error-message .btn-icon {
+  margin-left: auto;
+}
+
+.sample-files {
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sample-files p {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+/* ============================================================================
+   Step 2: Data Preview
+   ============================================================================ */
+
+.preview-step {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 1200px;
+  height: 100%;
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-info svg {
+  color: var(--accent-color);
+}
+
+.file-name {
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.file-stats {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.preview-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.preview-table-container {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.preview-table th,
+.preview-table td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.preview-table th {
+  background: var(--bg-elevated);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.preview-table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent-color) 5%, transparent);
+}
+
+.preview-table .header-name {
+  color: var(--accent-color);
+}
+
+.preview-table .empty-cell {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.preview-hint {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ============================================================================
+   Step 3: Mapping Wizard
+   ============================================================================ */
+
+.mapping-wizard {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  max-width: 1400px;
+}
+
+.wizard-progress {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent-color);
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.wizard-content {
+  display: flex;
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+}
+
+.wizard-left {
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+}
+
+.wizard-right {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.current-column {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.current-column h3 {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+
+.column-name-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--accent-color);
+  padding: 12px;
+  background: var(--bg-elevated);
+  border-radius: 6px;
+}
+
+.sample-values {
+  margin-top: 16px;
+}
+
+.sample-values h4 {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sample-values ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sample-values li {
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.recommendations {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.recommendations h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.rec-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+
+.recommendation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.recommendation-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.recommendation-item:hover {
+  background: var(--bg-elevated);
+  border-color: var(--accent-color);
+}
+
+.recommendation-item.selected {
+  background: color-mix(in srgb, var(--accent-color) 15%, transparent);
+  border-color: var(--accent-color);
+}
+
+.recommendation-item.high .rec-score {
+  color: var(--success);
+}
+
+.recommendation-item.medium .rec-score {
+  color: var(--warning);
+}
+
+.recommendation-item.low .rec-score {
+  color: var(--text-muted);
+}
+
+.rec-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rec-label {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.rec-uri {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.rec-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rec-score {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rec-check {
+  color: var(--accent-color);
+}
+
+.skip-btn {
+  margin-top: 12px;
+  width: 100%;
+}
+
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+/* ============================================================================
+   Cytoscape Ontology Graph
+   ============================================================================ */
+
+.ontology-graph-container {
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+  position: relative;
+  overflow: hidden;
+}
+
+.ontology-graph-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.ontology-graph-canvas canvas,
+.ontology-graph-canvas svg {
+  display: block;
+}
+
+.empty-graph-message {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text-muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+.graph-legend {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-elevated);
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  border: 1px solid var(--border-color);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.legend-diamond {
+  color: var(--accent-color);
+  font-size: 14px;
+}
+
+.legend-circle {
+  font-size: 16px;
+}
+
+.legend-circle.high {
+  color: var(--success);
+}
+
+.legend-circle.medium {
+  color: var(--warning);
+}
+
+.legend-circle.low {
+  color: var(--text-muted);
+}
+
+/* ============================================================================
+   Step 4: Review & Export
+   ============================================================================ */
+
+.review-step {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 1200px;
+  height: 100%;
+}
+
+.review-header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.review-header h2 {
+  font-size: 24px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--success);
+}
+
+.review-header p {
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.review-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+}
+
+.mapping-summary {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+  overflow: auto;
+}
+
+.mapping-summary h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+.summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.summary-table th,
+.summary-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.summary-table th {
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.summary-table tr.unmapped td {
+  color: var(--text-muted);
+}
+
+.mapped-property {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mapped-property .prop-uri {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.unmapped-label {
+  font-style: italic;
+}
+
+.rml-output {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rml-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.rml-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.rml-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.rml-code {
+  flex: 1;
+  margin: 0;
+  padding: 12px;
+  background: var(--bg-elevated);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.review-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+/* ============================================================================
+   Buttons (shared)
+   ============================================================================ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent-color);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-color) 85%, black);
+}
+
+.btn-secondary {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-color) 10%, var(--bg-elevated));
+  border-color: var(--accent-color);
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-icon:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+/* ============================================================================
+   Responsive
+   ============================================================================ */
+
+@media (max-width: 1024px) {
+  .wizard-content {
+    flex-direction: column;
+  }
+  
+  .wizard-left {
+    width: 100%;
+    max-height: 300px;
+  }
+  
+  .wizard-right {
+    min-height: 350px;
+  }
+  
+  .review-content {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================================
+   ETL Section Styles
+   ============================================================================ */
+
+.etl-section {
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  padding: 20px;
+  margin-top: 20px;
+  border: 1px solid var(--border-color);
+}
+
+.etl-header {
+  margin-bottom: 16px;
+}
+
+.etl-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 4px 0;
+}
+
+.etl-description {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.etl-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.output-format-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.output-format-select label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.output-format-select select {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.output-format-select select:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.btn-run-etl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-success {
+  background: var(--success-color, #10b981);
+  border-color: var(--success-color, #10b981);
+}
+
+.btn-success:hover:not(:disabled) {
+  background: var(--success-hover, #059669);
+  border-color: var(--success-hover, #059669);
+}
+
+.btn-success:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.etl-result {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.etl-result.success {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.etl-result.error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.result-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--success-color, #10b981);
+  margin-bottom: 12px;
+}
+
+.result-header .btn {
+  margin-left: auto;
+}
+
+.rdf-preview {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 12px;
+  font-family: 'Monaco', 'Consolas', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Format selector buttons */
+.format-selector {
+  display: flex;
+  gap: 4px;
+  margin-right: auto;
+}
+
+.format-selector .btn {
+  padding: 4px 12px;
+}
+
+/* Spin animation for loading */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@media (max-width: 768px) {
+  .starchart-header {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .header-steps {
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  
+  .preview-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .etl-controls {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+/* ============================================================================
+   Reduced Motion
+   ============================================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  .upload-zone,
+  .progress-fill,
+  .recommendation-item,
+  .btn {
+    transition: none;
+  }
+}

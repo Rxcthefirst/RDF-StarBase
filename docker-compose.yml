@@ -1,38 +1,29 @@
-# =============================================================================
-# RDF-StarBase Docker Compose
-# =============================================================================
-# Simple deployment with persistent data volume
-#
-# Usage:
-#   docker compose up -d        # Start in background
-#   docker compose logs -f      # View logs
-#   docker compose down         # Stop
-#   docker compose down -v      # Stop and remove volumes
-# =============================================================================
+version: '3.8'
 
 services:
-  rdf-starbase:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: rxcthefirst/rdf-starbase:latest
-    container_name: rdf-starbase
+  virtuoso:
+    image: openlink/virtuoso-opensource-7:latest
+    container_name: virtuoso
     ports:
-      - "8000:8000"
-    volumes:
-      # Persist repository data
-      - rdf-starbase-data:/data/repositories
+      - "8890:8890"   # HTTP/SPARQL endpoint
+      - "1111:1111"   # iSQL port
     environment:
-      - RDFSTARBASE_REPOSITORY_PATH=/data/repositories
-      - RDFSTARBASE_SERVE_STATIC=true
+      - DBA_PASSWORD=dba123
+      - SPARQL_UPDATE=true
+      - DEFAULT_GRAPH=http://localhost:8890/DAV
+      - VIRT_SPARQL_ResultSetMaxRows=50000
+      - VIRT_SPARQL_MaxQueryCostEstimationTime=400
+      - VIRT_SPARQL_MaxQueryExecutionTime=120
+    volumes:
+      - virtuoso_data:/opt/virtuoso-opensource/database
+      - ./data:/data:ro  # Mount data directory for bulk loading
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8890/sparql?query=SELECT%201 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 30s
 
 volumes:
-  rdf-starbase-data:
-    name: rdf-starbase-data
+  virtuoso_data:

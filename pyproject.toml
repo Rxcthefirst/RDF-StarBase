@@ -50,9 +50,17 @@ web = [
 sql = [
     "duckdb>=1.0.0",
 ]
+auth = [
+    "PyJWT>=2.8.0",
+    "cryptography>=41.0.0",
+    "httpx>=0.25.0",
+]
 viz = [
     "networkx>=3.2.0",
     "matplotlib>=3.8.0",
+]
+etl = [
+    "semantic-rdf-mapper>=0.3.0",
 ]
 
 [project.urls]
@@ -61,7 +69,7 @@ Repository = "https://github.com/ontus/rdf-starbase"
 Documentation = "https://rdf-starbase.readthedocs.io"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rdf_starbase"]
+packages = ["src/rdf_starbase", "src/api"]
 
 [tool.black]
 line-length = 100
@@ -83,4 +91,4 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --cov=src/rdf_starbase --cov-report=html --cov-report=term"
+addopts = "-v --cov=src/rdf_starbase --cov=src/api --cov-report=html --cov-report=term"

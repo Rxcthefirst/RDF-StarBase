@@ -158,24 +158,41 @@ class AuditEntry:
 
 
 class AuditLog:
-    """Manages audit log entries."""
+    """Manages audit log entries with rotation and archiving support."""
     
     def __init__(
         self,
         storage_path: Path | None = None,
         max_entries: int = 100000,
         retention_days: int = 90,
+        archive_path: Path | None = None,
+        max_file_size_mb: float = 100.0,
+        auto_archive: bool = True,
     ):
         """Initialize audit log.
         
         Args:
             storage_path: Path to persist logs
             max_entries: Maximum entries to keep in memory
-            retention_days: Days to retain entries
+            retention_days: Days to retain entries (older are rotated/archived)
+            archive_path: Path to store archived logs (default: storage_path/../archive)
+            max_file_size_mb: Maximum size of active log file before rotation
+            auto_archive: Whether to automatically archive old entries on rotation
         """
         self.storage_path = storage_path
         self.max_entries = max_entries
         self.retention_days = retention_days
+        self.max_file_size_mb = max_file_size_mb
+        self.auto_archive = auto_archive
+        
+        # Set archive path
+        if archive_path:
+            self.archive_path = archive_path
+        elif storage_path:
+            self.archive_path = storage_path.parent / "archive"
+        else:
+            self.archive_path = None
+            
         self._entries: list[AuditEntry] = []
         self._entry_counter = 0
         
@@ -372,6 +389,204 @@ class AuditLog:
             self._save()
         return removed
     
+    def rotate(self, archive: bool = True) -> dict[str, Any]:
+        """Rotate the audit log, optionally archiving old entries.
+        
+        Args:
+            archive: If True, archive old entries before clearing
+            
+        Returns:
+            Summary of rotation operation
+        """
+        old_entries = self._entries.copy()
+        result = {
+            "entries_rotated": len(old_entries),
+            "archived": False,
+            "archive_path": None,
+        }
+        
+        if archive and old_entries and self.archive_path:
+            archive_file = self._archive_entries(old_entries)
+            result["archived"] = True
+            result["archive_path"] = str(archive_file)
+        
+        # Clear current entries
+        self._entries = []
+        self._save()
+        
+        return result
+    
+    def rotate_if_needed(self) -> dict[str, Any] | None:
+        """Rotate if log exceeds size limit or entry count.
+        
+        Returns:
+            Rotation summary if rotation occurred, None otherwise
+        """
+        # Check entry count
+        if len(self._entries) > self.max_entries:
+            return self.rotate(archive=self.auto_archive)
+        
+        # Check file size
+        if self.storage_path and self.storage_path.exists():
+            size_mb = self.storage_path.stat().st_size / (1024 * 1024)
+            if size_mb > self.max_file_size_mb:
+                return self.rotate(archive=self.auto_archive)
+        
+        return None
+    
+    def _archive_entries(self, entries: list[AuditEntry]) -> Path:
+        """Archive entries to a timestamped file.
+        
+        Args:
+            entries: Entries to archive
+            
+        Returns:
+            Path to the archive file
+        """
+        if not self.archive_path:
+            raise ValueError("Archive path not configured")
+        
+        self.archive_path.mkdir(parents=True, exist_ok=True)
+        
+        # Create timestamped archive filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if entries:
+            start_date = entries[0].timestamp.strftime("%Y%m%d")
+            end_date = entries[-1].timestamp.strftime("%Y%m%d")
+            archive_name = f"audit_{start_date}_to_{end_date}_{timestamp}.json"
+        else:
+            archive_name = f"audit_{timestamp}.json"
+        
+        archive_file = self.archive_path / archive_name
+        
+        # Write archive
+        data = {
+            "archived_at": datetime.now().isoformat(),
+            "entry_count": len(entries),
+            "earliest": entries[0].timestamp.isoformat() if entries else None,
+            "latest": entries[-1].timestamp.isoformat() if entries else None,
+            "entries": [e.to_dict() for e in entries],
+        }
+        archive_file.write_text(json.dumps(data, indent=2))
+        
+        return archive_file
+    
+    def list_archives(self) -> list[dict[str, Any]]:
+        """List available audit log archives.
+        
+        Returns:
+            List of archive summaries
+        """
+        if not self.archive_path or not self.archive_path.exists():
+            return []
+        
+        archives = []
+        for f in sorted(self.archive_path.glob("audit_*.json"), reverse=True):
+            try:
+                data = json.loads(f.read_text())
+                archives.append({
+                    "filename": f.name,
+                    "path": str(f),
+                    "archived_at": data.get("archived_at"),
+                    "entry_count": data.get("entry_count", 0),
+                    "earliest": data.get("earliest"),
+                    "latest": data.get("latest"),
+                    "size_bytes": f.stat().st_size,
+                })
+            except (json.JSONDecodeError, OSError):
+                continue
+        
+        return archives
+    
+    def load_archive(self, archive_path: Path | str) -> list[AuditEntry]:
+        """Load entries from an archive file.
+        
+        Args:
+            archive_path: Path to the archive file
+            
+        Returns:
+            List of audit entries from the archive
+        """
+        path = Path(archive_path) if isinstance(archive_path, str) else archive_path
+        
+        if not path.exists():
+            raise FileNotFoundError(f"Archive not found: {path}")
+        
+        data = json.loads(path.read_text())
+        return [AuditEntry.from_dict(e) for e in data.get("entries", [])]
+    
+    def delete_archive(self, archive_path: Path | str) -> bool:
+        """Delete an archive file.
+        
+        Args:
+            archive_path: Path to the archive file
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        path = Path(archive_path) if isinstance(archive_path, str) else archive_path
+        
+        if not path.exists():
+            return False
+        
+        path.unlink()
+        return True
+    
+    def cleanup_old_archives(self, keep_days: int | None = None) -> int:
+        """Remove archives older than specified days.
+        
+        Args:
+            keep_days: Days to keep archives (default: retention_days * 2)
+            
+        Returns:
+            Number of archives deleted
+        """
+        if not self.archive_path or not self.archive_path.exists():
+            return 0
+        
+        keep_days = keep_days or (self.retention_days * 2)
+        cutoff = datetime.now() - timedelta(days=keep_days)
+        deleted = 0
+        
+        for archive in self.list_archives():
+            try:
+                archived_at = datetime.fromisoformat(archive["archived_at"])
+                if archived_at < cutoff:
+                    if self.delete_archive(archive["path"]):
+                        deleted += 1
+            except (ValueError, KeyError):
+                continue
+        
+        return deleted
+    
+    def get_rotation_status(self) -> dict[str, Any]:
+        """Get current rotation status and configuration.
+        
+        Returns:
+            Status information including when rotation might trigger
+        """
+        status = {
+            "current_entries": len(self._entries),
+            "max_entries": self.max_entries,
+            "retention_days": self.retention_days,
+            "max_file_size_mb": self.max_file_size_mb,
+            "auto_archive": self.auto_archive,
+            "current_file_size_mb": None,
+            "archive_path": str(self.archive_path) if self.archive_path else None,
+            "archive_count": 0,
+            "will_rotate_at_entries": self.max_entries,
+        }
+        
+        if self.storage_path and self.storage_path.exists():
+            status["current_file_size_mb"] = round(
+                self.storage_path.stat().st_size / (1024 * 1024), 2
+            )
+        
+        if self.archive_path and self.archive_path.exists():
+            status["archive_count"] = len(list(self.archive_path.glob("audit_*.json")))
+        
+        return status
+
     def clear(self) -> int:
         """Clear all entries. Returns count cleared."""
         count = len(self._entries)

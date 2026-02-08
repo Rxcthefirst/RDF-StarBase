@@ -4,9 +4,9 @@
 
 ---
 
-## Current Status: v1.1.0 Complete ✅
+## Current Status: v1.2.0 Complete ✅
 
-RDF-StarBase is now **production-ready** with SHACL validation, ontology packs, certification, and schema guidance (1512 tests, 74% coverage). Full governance, compliance, and certification!
+RDF-StarBase is now **production-ready** with OAuth2/OIDC support, configurable rate limiting, audit log rotation, and comprehensive enterprise auth. Full governance, compliance, and certification!
 
 ### Architecture Assessment
 
@@ -15,7 +15,7 @@ RDF-StarBase is now **production-ready** with SHACL validation, ontology packs, 
 | **Storage Engine** | 9/10 | ✅ WAL, ACID, partitioning, indexes, memory budget |
 | **Repository Manager** | 9/10 | ✅ Backup/restore, clone, versioning, config |
 | **Product Workflows** | 9/10 | ✅ Staging, observability, graph explorer, query tools |
-| **Trust & Security** | 9/10 | ✅ Auth, audit, trust scoring, compliance |
+| **Trust & Security** | 10/10 | ✅ Auth, OAuth2/OIDC, audit, trust scoring, compliance |
 | **Enterprise Ops** | 9/10 | ✅ Federation, multi-tenancy, Prometheus, tracing |
 | **Governance** | 9/10 | ✅ SHACL validation, ontology packs, schema guidance |
 | **Certification** | 9/10 | ✅ W3C SPARQL 1.1, RDF-Star, Security audit |
@@ -48,7 +48,8 @@ RDF-StarBase is now **production-ready** with SHACL validation, ontology packs, 
 | **Observability** | Metrics collection, health checks, admin dashboard data | ✅ |
 | **Repository Config** | Schema versioning, migrations, per-repo configuration | ✅ |
 | **Authentication** | API key management, role-based access, scoped tokens, rate limiting | ✅ |
-| **Audit & Compliance** | Audit log, CSV/JSON export, data lineage tracking, source health | ✅ |
+| **OAuth2/OIDC** | JWT validation, JWKS, provider templates (Keycloak, Azure AD, Okta, Auth0) | ✅ |
+| **Audit & Compliance** | Audit log, CSV/JSON export, data lineage tracking, source health, rotation | ✅ |
 | **Trust Scoring** | Configurable trust policies, confidence decay, conflict resolution | ✅ |
 | **Federation** | SERVICE clause, cross-instance sync, distributed query planning | ✅ |
 | **Multi-tenancy** | Tenant isolation, resource quotas, usage tracking | ✅ |
@@ -72,6 +73,8 @@ RDF-StarBase is now **production-ready** with SHACL validation, ontology packs, 
 ### v0.4.0 — Trust & Security (Q4 2026) ✅ SHIPPED
 ### v1.0.0 — Production (Q1 2027) ✅ SHIPPED
 ### v1.1.0 — Governance & Ontologies (Q2 2027) ✅ SHIPPED
+### v1.2.0 — Enterprise Auth Enhancements (Q3 2027) ✅ SHIPPED
+### v2.0.0 — Data Integration Platform (Q4 2027) 🚧 IN PROGRESS
 
 *See archived sections below for completed features.*
 
@@ -100,7 +103,7 @@ RDF-StarBase is now **production-ready** with SHACL validation, ontology packs, 
 #### Query Workspace (Priority: MEDIUM) ✅
 - [x] **Saved queries** — Persist queries to repo metadata with name, description, tags ✅
 - [x] **Query history** — Last N queries with timestamps, stored per-session or per-repo ✅
-- [ ] **SQL tab in UI** — DuckDB interface alongside SPARQL editor (deferred to v0.4.0)
+- [x] **SQL tab in UI** — DuckDB interface alongside SPARQL editor ✅
 - [x] **Export results** — CSV, JSON, TSV, JSONL, Parquet download from result grid ✅
 - [x] **Pagination with cursors** — Efficient cursor-based paging beyond LIMIT/OFFSET ✅
 
@@ -180,6 +183,88 @@ RDF-StarBase is now **production-ready** with SHACL validation, ontology packs, 
 - [x] **Auto-complete from ranges** — Suggest types based on predicate domains ✅
 - [x] **"Annotate statement" wizard** — UI for adding RDF-Star metadata ✅
 - [x] **Template forms** — Generate templates via ontology packs ✅
+
+---
+
+### v1.2.0 — Enterprise Auth Enhancements (Q3 2027) ✅
+
+**Goal:** Production-grade SSO integration and operational improvements
+
+#### OAuth2/OIDC Support ✅
+- [x] **OIDC Discovery** — Auto-configure from .well-known endpoints ✅
+- [x] **JWT Validation** — JWKS-based token verification ✅
+- [x] **Claims Mapping** — Extract roles/repos from JWT claims ✅
+- [x] **Provider Templates** — Pre-configured Keycloak, Azure AD, Okta, Auth0 ✅
+
+#### Operational Improvements ✅
+- [x] **Configurable Rate Limiting** — RateLimitConfig with burst allowance ✅
+- [x] **Audit Log Rotation** — Size/count based rotation with archiving ✅
+- [x] **Archive Management** — List, load, cleanup old audit archives ✅
+
+---
+
+### v2.0.0 — Data Integration Platform (Q4 2027)
+
+**Goal:** Transform RDF-StarBase into a complete data integration and governance platform
+
+#### Starchart — Visual RML/R2RML Mapper (Priority: HIGH) 🚧 IN PROGRESS
+- [x] **CSV upload workflow** — Drag-drop CSV files with preview of headers and sample rows ✅
+- [x] **Column-to-property wizard** — Step through each column with smart recommendations ✅
+- [x] **D3 ontology graph** — Visual ontology with highlighted property recommendations ✅
+- [x] **Similarity-based recommendations** — String similarity matching column headers to ontology properties ✅
+- [x] **RML generation** — Generate RML mappings from visual design with download/copy ✅
+- [ ] **Mapping templates** — Pre-built templates for common data patterns
+- [ ] **Database source support** — Connect to SQL databases alongside CSV files
+- [ ] **Mapping validation** — Test mappings against sample data before deployment
+
+#### ONTOP — Virtualized Data (Priority: HIGH)
+- [ ] **Virtual SPARQL endpoint** — Query external sources via SPARQL without materialization
+- [ ] **PostgreSQL connector** — Virtualize PostgreSQL tables as RDF graphs
+- [ ] **MySQL connector** — Virtualize MySQL databases
+- [ ] **Connection management** — Secure credential storage, connection pooling
+- [ ] **Query pushdown** — Optimize queries by pushing filters to source databases
+
+#### RDFMap — Materialize Semistructured Data (Priority: HIGH)
+- [ ] **ETL pipeline engine** — Execute RML mappings to materialize triples
+- [ ] **Incremental updates** — Detect changes and update only affected triples
+- [ ] **Source monitoring** — Track source freshness, trigger re-materialization
+- [ ] **Batch scheduling** — Cron-like scheduling for materialization jobs
+- [ ] **Error handling** — Quarantine failed records, retry logic
+
+#### Protégé-like Ontology Editor (Priority: MEDIUM)
+- [ ] **Visual ontology editor** — Create/edit classes, properties, restrictions
+- [ ] **Ontology visualization** — Graph view of class hierarchy and relationships
+- [ ] **Provenance tracking** — Track who changed what in the ontology, when
+- [ ] **Version control** — Ontology versioning with diff and rollback
+- [ ] **Import/export** — Load from and export to OWL, RDFS, SKOS formats
+
+#### Materialized vs Virtualized Understanding (Priority: MEDIUM)
+- [ ] **Data source annotations** — Tag data as materialized or virtualized
+- [ ] **Access pattern tracking** — Monitor query patterns per data source
+- [ ] **Performance hints** — Recommend materialization based on access frequency
+- [ ] **Hybrid queries** — Seamlessly combine materialized and virtualized data
+
+#### SKOS Vocabulary Management (Priority: MEDIUM)
+- [ ] **Vocabulary browser** — Browse and search SKOS concept schemes
+- [ ] **Alias management** — Track alternative labels, column header mappings
+- [ ] **Cross-vocabulary mapping** — Map concepts across different vocabularies
+- [ ] **Import from standards** — Load SKOS vocabularies from LOV, Schema.org, etc.
+- [ ] **Embedding-enhanced matching** — Use SKOS aliases to improve property recommendations in Starchart
+
+#### Embeddings & Search (Priority: MEDIUM)
+- [ ] **Vector index** — Store embeddings for literals and URIs
+- [ ] **Semantic search** — Find similar entities by embedding distance
+- [ ] **Hybrid retrieval** — Combine SPARQL filters with vector similarity
+- [ ] **Embedding providers** — Support OpenAI, Cohere, local models
+- [ ] **SKOS-enhanced recommendations** — Leverage vocabulary aliases for better column-to-property matching
+
+#### Governance Framework (Priority: HIGH)
+- [ ] **Governance policies** — Define rules for data access, retention, quality
+- [ ] **Provenance graphs** — PROV-O based lineage from source to derived
+- [ ] **Auditability dashboard** — Visual compliance reporting
+- [ ] **Virtualization vs materialization policies** — Rules for when to materialize
+- [ ] **Change management** — Approval workflows for schema/data changes
+- [ ] **Agent safety** — Guardrails for AI agents accessing the knowledge graph
 
 ---
 

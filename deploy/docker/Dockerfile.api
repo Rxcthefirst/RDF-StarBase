@@ -1,23 +1,23 @@
 # =============================================================================
 # RDF-StarBase Docker Image
 # =============================================================================
-# Multi-stage build: Node.js for frontend, Python for backend
-# Final image serves both frontend and API from a single container
+# Multi-stage build: Node.js for UI, Python for API
+# Final image serves both UI and API from a single container
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Stage 1: Build Frontend
+# Stage 1: Build UI
 # -----------------------------------------------------------------------------
-FROM node:20-alpine AS frontend-builder
+FROM node:20-alpine AS ui-builder
 
-WORKDIR /app/frontend
+WORKDIR /app/ui
 
 # Copy package files and install dependencies
-COPY frontend/package*.json ./
+COPY src/ui/package*.json ./
 RUN npm ci --silent
 
-# Copy frontend source and build
-COPY frontend/ ./
+# Copy UI source and build
+COPY src/ui/ ./
 RUN npm run build
 
 # -----------------------------------------------------------------------------
@@ -48,8 +48,8 @@ COPY src/ ./src/
 # Install the package with all dependencies (including web, query, and sql for DuckDB)
 RUN pip install --no-cache-dir -e ".[dev,web,query,sql]"
 
-# Copy built frontend from builder stage
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+# Copy built UI from builder stage
+COPY --from=ui-builder /app/ui/dist ./src/ui/dist
 
 # Create data directory
 RUN mkdir -p /data/repositories
@@ -62,4 +62,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Entry point - run the FastAPI server
-CMD ["python", "-m", "uvicorn", "rdf_starbase.web:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "api.web:app", "--host", "0.0.0.0", "--port", "8000"]

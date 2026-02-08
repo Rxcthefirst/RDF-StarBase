@@ -7,12 +7,13 @@ import Dashboard from './components/Dashboard'
 import Security from './components/Security'
 import SQLExplorer from './components/SQLExplorer'
 import AIGrounding from './components/AIGrounding'
+import Starchart from './components/Starchart'
 import {
   DatabaseIcon, PlayIcon, PlusIcon, TrashIcon, FolderIcon,
   TableIcon, NetworkIcon, CodeIcon, SunIcon, MoonIcon,
   SearchIcon, SettingsIcon, BookIcon, ZapIcon, GlobeIcon,
   ChevronDownIcon, CloseIcon, RefreshIcon, HomeIcon, ShieldIcon,
-  TerminalIcon, BrainIcon
+  TerminalIcon, BrainIcon, MapIcon
 } from './components/Icons'
 import './index.css'
 
@@ -1073,6 +1074,12 @@ function App() {
             >
               <BrainIcon size={16} /> AI Grounding
             </button>
+            <button 
+              className={`tab-btn ${activeTab === 'mapper' ? 'active' : ''}`}
+              onClick={() => setActiveTab('mapper')}
+            >
+              <MapIcon size={16} /> Mapper
+            </button>
           </div>
         </div>
 
@@ -1141,6 +1148,8 @@ function App() {
           <SQLExplorer theme={theme} currentRepo={currentRepo} />
         ) : activeTab === 'ai' ? (
           <AIGrounding theme={theme} currentRepo={currentRepo} />
+        ) : activeTab === 'mapper' ? (
+          <Starchart theme={theme} />
         ) : (
         <>
         {/* Query Panel */}
