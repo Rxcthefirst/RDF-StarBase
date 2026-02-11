@@ -919,13 +919,11 @@ class TripleStore:
         g_id = self._term_dict.intern_iri(graph) if graph else DEFAULT_GRAPH_ID
         source_id = self._term_dict.intern_literal(source)
         
-        # Intern subjects (all URIs)
-        s_col = [self._term_dict.intern_iri(s) for s in subjects]
+        # Use batch interning for subjects and predicates (~3x faster)
+        s_col = self._term_dict.intern_iris_batch(subjects)
+        p_col = self._term_dict.intern_iris_batch(predicates)
         
-        # Intern predicates (all URIs)
-        p_col = [self._term_dict.intern_iri(p) for p in predicates]
-        
-        # Intern objects (could be literals or URIs)
+        # Intern objects (could be literals or URIs — must dispatch per-item)
         o_col = [self._intern_term(o) for o in objects]
         
         # Graph column
@@ -944,6 +942,26 @@ class TripleStore:
         
         self._invalidate_cache()
         return n
+
+    def begin_bulk_insert(self) -> None:
+        """Begin bulk insertion mode.
+        
+        Defers DataFrame concatenation in the FactStore — all inserts
+        are buffered and flushed in a single concat when
+        ``end_bulk_insert()`` is called, avoiding the O(n²) repeated
+        copy cost.
+        """
+        self._fact_store.begin_batch()
+
+    def end_bulk_insert(self) -> int:
+        """End bulk insertion and flush buffered DataFrames.
+        
+        Returns:
+            Number of rows flushed.
+        """
+        count = self._fact_store.flush_batch()
+        self._invalidate_cache()
+        return count
 
     def get_triples(
         self,
@@ -1601,8 +1619,20 @@ class TripleStore:
             stem = file_path.stem  # e.g., "file.ttl" from "file.ttl.gz"
             suffix = Path(stem).suffix.lower()  # e.g., ".ttl"
         
-        # Try Oxigraph fast path for simple formats without RDF-Star annotations
-        if self._use_oxigraph_parsing and suffix in (".ttl", ".turtle", ".nt", ".ntriples"):
+        # Read file content first to check for RDF-Star syntax
+        if is_gzipped:
+            import gzip
+            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                file_content = f.read()
+        else:
+            file_content = file_path.read_text(encoding="utf-8")
+        
+        # Check for RDF-Star quoted triple syntax: << ... >>
+        # Skip Oxigraph if content contains RDF-Star, as it may not handle it correctly
+        has_rdfstar = '<<' in file_content and '>>' in file_content
+        
+        # Try Oxigraph fast path for simple formats WITHOUT RDF-Star annotations
+        if self._use_oxigraph_parsing and suffix in (".ttl", ".turtle", ".nt", ".ntriples") and not has_rdfstar:
             try:
                 return self._load_graph_oxigraph(file_path, source_uri, graph_uri, suffix, is_gzipped)
             except Exception:
@@ -1610,13 +1640,6 @@ class TripleStore:
                 pass
         
         try:
-            # Read file content, handling gzip if needed
-            if is_gzipped:
-                import gzip
-                with gzip.open(file_path, 'rt', encoding='utf-8') as f:
-                    file_content = f.read()
-            else:
-                file_content = file_path.read_text(encoding="utf-8")
             
             if suffix in (".ttl", ".turtle"):
                 from rdf_starbase.formats.turtle import parse_turtle

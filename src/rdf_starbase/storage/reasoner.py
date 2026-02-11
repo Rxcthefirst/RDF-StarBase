@@ -62,6 +62,9 @@ OWL_ON_PROPERTY = OWL_NS + "onProperty"
 OWL_SOME_VALUES_FROM = OWL_NS + "someValuesFrom"
 OWL_ALL_VALUES_FROM = OWL_NS + "allValuesFrom"
 OWL_INTERSECTION_OF = OWL_NS + "intersectionOf"
+OWL_UNION_OF = OWL_NS + "unionOf"
+OWL_PROPERTY_CHAIN_AXIOM = OWL_NS + "propertyChainAxiom"
+OWL_DIFFERENT_FROM = OWL_NS + "differentFrom"
 RDF_FIRST = RDF_NS + "first"
 RDF_REST = RDF_NS + "rest"
 RDF_NIL = RDF_NS + "nil"
@@ -148,7 +151,11 @@ class RDFSReasoner:
             (OWL_HAS_VALUE, "hasValue"),
             (OWL_ON_PROPERTY, "onProperty"),
             (OWL_SOME_VALUES_FROM, "someValuesFrom"),
+            (OWL_ALL_VALUES_FROM, "allValuesFrom"),
             (OWL_INTERSECTION_OF, "intersectionOf"),
+            (OWL_UNION_OF, "unionOf"),
+            (OWL_PROPERTY_CHAIN_AXIOM, "propertyChainAxiom"),
+            (OWL_DIFFERENT_FROM, "differentFrom"),
             (RDF_FIRST, "first"),
             (RDF_REST, "rest"),
             (RDF_NIL, "nil"),
@@ -266,6 +273,13 @@ class RDFSReasoner:
                 new_facts.extend(self._apply_owl_functional(vocab, existing_facts, graph_id, stats))
                 new_facts.extend(self._apply_owl_inverse_functional(vocab, existing_facts, graph_id, stats))
                 new_facts.extend(self._apply_owl_has_value(vocab, existing_facts, graph_id, stats))
+                # NEW OWL 2 RL rules
+                new_facts.extend(self._apply_owl_all_values_from(vocab, existing_facts, graph_id, stats))
+                new_facts.extend(self._apply_owl_some_values_from(vocab, existing_facts, graph_id, stats))
+                new_facts.extend(self._apply_owl_union_of(vocab, existing_facts, graph_id, stats))
+                new_facts.extend(self._apply_owl_intersection_of(vocab, existing_facts, graph_id, stats))
+                new_facts.extend(self._apply_owl_property_chain(vocab, existing_facts, graph_id, stats))
+                new_facts.extend(self._apply_owl_different_from(vocab, existing_facts, graph_id, stats))
             
             if not new_facts:
                 # Fixed point reached
@@ -1023,6 +1037,354 @@ class RDFSReasoner:
                 if fact not in existing:
                     new_facts.append(fact)
                     stats.owl_has_value_inferences += 1
+        
+        return new_facts
+    
+    def _apply_owl_all_values_from(
+        self,
+        vocab: dict,
+        existing: Set[Tuple[TermId, TermId, TermId, TermId]],
+        graph_id: TermId,
+        stats: ReasoningStats,
+    ) -> List[Tuple[TermId, TermId, TermId, TermId]]:
+        """
+        owl:allValuesFrom restriction inference.
+        
+        (C allValuesFrom D) + (C onProperty p) + (x type C) + (x p y) => (y type D)
+        """
+        all_values_id = vocab.get("allValuesFrom")
+        on_property_id = vocab.get("onProperty")
+        type_id = vocab.get("type")
+        if all_values_id is None or on_property_id is None or type_id is None:
+            return []
+        
+        # Get restrictions
+        all_values_pairs = self._get_facts_with_predicate(all_values_id, graph_id)
+        on_property_pairs = self._get_facts_with_predicate(on_property_id, graph_id)
+        
+        if not all_values_pairs or not on_property_pairs:
+            return []
+        
+        # Build restriction map: C -> (p, D)
+        c_to_prop: dict[TermId, TermId] = {}
+        for c, p in on_property_pairs:
+            c_to_prop[c] = p
+        
+        restrictions: dict[TermId, Tuple[TermId, TermId]] = {}  # C -> (p, D)
+        for c, d in all_values_pairs:
+            if c in c_to_prop:
+                restrictions[c] = (c_to_prop[c], d)
+        
+        if not restrictions:
+            return []
+        
+        # Get type and property assertions
+        type_pairs = self._get_facts_with_predicate(type_id, graph_id)
+        
+        # Build: x -> types
+        x_types: dict[TermId, Set[TermId]] = {}
+        for x, c in type_pairs:
+            if x not in x_types:
+                x_types[x] = set()
+            x_types[x].add(c)
+        
+        # Get all property facts
+        df = self._fact_store.scan_facts()
+        filtered = df.filter(
+            (pl.col("g") == graph_id) &
+            (~(pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)).cast(pl.Boolean))
+        )
+        
+        new_facts = []
+        
+        # For each (x type C) where C has allValuesFrom restriction
+        for x, types in x_types.items():
+            for c in types:
+                if c in restrictions:
+                    p, d = restrictions[c]
+                    # Find all (x p y) and infer (y type D)
+                    prop_facts = filtered.filter(
+                        (pl.col("s") == x) &
+                        (pl.col("p") == p)
+                    )
+                    for row in prop_facts.iter_rows(named=True):
+                        y = row["o"]
+                        fact = (graph_id, y, type_id, d)
+                        if fact not in existing:
+                            new_facts.append(fact)
+        
+        return new_facts
+    
+    def _apply_owl_some_values_from(
+        self,
+        vocab: dict,
+        existing: Set[Tuple[TermId, TermId, TermId, TermId]],
+        graph_id: TermId,
+        stats: ReasoningStats,
+    ) -> List[Tuple[TermId, TermId, TermId, TermId]]:
+        """
+        owl:someValuesFrom restriction inference.
+        
+        (C someValuesFrom D) + (C onProperty p) + (x p y) + (y type D) => (x type C)
+        """
+        some_values_id = vocab.get("someValuesFrom")
+        on_property_id = vocab.get("onProperty")
+        type_id = vocab.get("type")
+        if some_values_id is None or on_property_id is None or type_id is None:
+            return []
+        
+        # Get restrictions
+        some_values_pairs = self._get_facts_with_predicate(some_values_id, graph_id)
+        on_property_pairs = self._get_facts_with_predicate(on_property_id, graph_id)
+        
+        if not some_values_pairs or not on_property_pairs:
+            return []
+        
+        # Build restriction map
+        c_to_prop: dict[TermId, TermId] = {}
+        for c, p in on_property_pairs:
+            c_to_prop[c] = p
+        
+        restrictions: dict[TermId, Tuple[TermId, TermId]] = {}
+        for c, d in some_values_pairs:
+            if c in c_to_prop:
+                restrictions[c] = (c_to_prop[c], d)
+        
+        if not restrictions:
+            return []
+        
+        # Build type map: y -> types
+        type_pairs = self._get_facts_with_predicate(type_id, graph_id)
+        y_types: dict[TermId, Set[TermId]] = {}
+        for y, t in type_pairs:
+            if y not in y_types:
+                y_types[y] = set()
+            y_types[y].add(t)
+        
+        # Get all property facts
+        df = self._fact_store.scan_facts()
+        filtered = df.filter(
+            (pl.col("g") == graph_id) &
+            (~(pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)).cast(pl.Boolean))
+        )
+        
+        new_facts = []
+        
+        # For each restriction C with someValuesFrom D on property p
+        for c, (p, d) in restrictions.items():
+            # Find (x p y) where (y type D)
+            prop_facts = filtered.filter(pl.col("p") == p)
+            for row in prop_facts.iter_rows(named=True):
+                x = row["s"]
+                y = row["o"]
+                # Check if y has type D
+                if y in y_types and d in y_types[y]:
+                    fact = (graph_id, x, type_id, c)
+                    if fact not in existing:
+                        new_facts.append(fact)
+        
+        return new_facts
+    
+    def _apply_owl_union_of(
+        self,
+        vocab: dict,
+        existing: Set[Tuple[TermId, TermId, TermId, TermId]],
+        graph_id: TermId,
+        stats: ReasoningStats,
+    ) -> List[Tuple[TermId, TermId, TermId, TermId]]:
+        """
+        owl:unionOf class expression.
+        
+        (C unionOf (C1 C2 ...)) + (x type Ci) => (x type C)
+        """
+        union_id = vocab.get("unionOf")
+        type_id = vocab.get("type")
+        if union_id is None or type_id is None:
+            return []
+        
+        # Get union declarations
+        union_pairs = self._get_facts_with_predicate(union_id, graph_id)
+        if not union_pairs:
+            return []
+        
+        # Parse lists to get union members
+        from rdf_starbase.storage.inference.rules import RuleApplicator
+        applicator = RuleApplicator(self._term_dict, self._fact_store)
+        
+        unions: dict[TermId, Set[TermId]] = {}  # C -> {C1, C2, ...}
+        for c, list_head in union_pairs:
+            members = applicator.parse_rdf_list(list_head, graph_id)
+            if members:
+                unions[c] = set(members)
+        
+        if not unions:
+            return []
+        
+        # Get type assertions
+        type_pairs = self._get_facts_with_predicate(type_id, graph_id)
+        
+        new_facts = []
+        for x, ci in type_pairs:
+            # Check if ci is a member of any union
+            for c, members in unions.items():
+                if ci in members:
+                    fact = (graph_id, x, type_id, c)
+                    if fact not in existing:
+                        new_facts.append(fact)
+        
+        return new_facts
+    
+    def _apply_owl_intersection_of(
+        self,
+        vocab: dict,
+        existing: Set[Tuple[TermId, TermId, TermId, TermId]],
+        graph_id: TermId,
+        stats: ReasoningStats,
+    ) -> List[Tuple[TermId, TermId, TermId, TermId]]:
+        """
+        owl:intersectionOf class expression.
+        
+        (C intersectionOf (C1 C2 ...)) + (x type C1) + (x type C2) + ... => (x type C)
+        """
+        intersection_id = vocab.get("intersectionOf")
+        type_id = vocab.get("type")
+        if intersection_id is None or type_id is None:
+            return []
+        
+        # Get intersection declarations
+        intersection_pairs = self._get_facts_with_predicate(intersection_id, graph_id)
+        if not intersection_pairs:
+            return []
+        
+        from rdf_starbase.storage.inference.rules import RuleApplicator
+        applicator = RuleApplicator(self._term_dict, self._fact_store)
+        
+        intersections: dict[TermId, Set[TermId]] = {}
+        for c, list_head in intersection_pairs:
+            members = applicator.parse_rdf_list(list_head, graph_id)
+            if members:
+                intersections[c] = set(members)
+        
+        if not intersections:
+            return []
+        
+        # Get all types for each individual
+        type_pairs = self._get_facts_with_predicate(type_id, graph_id)
+        x_types: dict[TermId, Set[TermId]] = {}
+        for x, t in type_pairs:
+            if x not in x_types:
+                x_types[x] = set()
+            x_types[x].add(t)
+        
+        new_facts = []
+        for c, members in intersections.items():
+            # Find all x that have ALL member types
+            for x, types in x_types.items():
+                if members.issubset(types):
+                    fact = (graph_id, x, type_id, c)
+                    if fact not in existing:
+                        new_facts.append(fact)
+        
+        return new_facts
+    
+    def _apply_owl_property_chain(
+        self,
+        vocab: dict,
+        existing: Set[Tuple[TermId, TermId, TermId, TermId]],
+        graph_id: TermId,
+        stats: ReasoningStats,
+    ) -> List[Tuple[TermId, TermId, TermId, TermId]]:
+        """
+        owl:propertyChainAxiom inference.
+        
+        (p propertyChainAxiom (p1 p2)) + (x p1 y) + (y p2 z) => (x p z)
+        """
+        chain_id = vocab.get("propertyChainAxiom")
+        if chain_id is None:
+            return []
+        
+        # Get property chains
+        chain_pairs = self._get_facts_with_predicate(chain_id, graph_id)
+        if not chain_pairs:
+            return []
+        
+        from rdf_starbase.storage.inference.rules import RuleApplicator
+        applicator = RuleApplicator(self._term_dict, self._fact_store)
+        
+        chains: dict[TermId, List[TermId]] = {}  # p -> [p1, p2, ...]
+        for p, list_head in chain_pairs:
+            members = applicator.parse_rdf_list(list_head, graph_id)
+            if len(members) >= 2:
+                chains[p] = members
+        
+        if not chains:
+            return []
+        
+        # Get all facts for property lookups
+        df = self._fact_store.scan_facts()
+        filtered = df.filter(
+            (pl.col("g") == graph_id) &
+            (~(pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)).cast(pl.Boolean))
+        )
+        
+        new_facts = []
+        
+        for p, chain in chains.items():
+            if len(chain) == 2:
+                # Simple 2-element chain: p1, p2
+                p1, p2 = chain
+                
+                # Get all (x p1 y) pairs
+                p1_facts = filtered.filter(pl.col("p") == p1)
+                p1_dict: dict[TermId, List[TermId]] = {}  # y -> [x, ...]
+                for row in p1_facts.iter_rows(named=True):
+                    y = row["o"]
+                    if y not in p1_dict:
+                        p1_dict[y] = []
+                    p1_dict[y].append(row["s"])
+                
+                # Get all (y p2 z) pairs and join
+                p2_facts = filtered.filter(pl.col("p") == p2)
+                for row in p2_facts.iter_rows(named=True):
+                    y = row["s"]
+                    z = row["o"]
+                    if y in p1_dict:
+                        for x in p1_dict[y]:
+                            fact = (graph_id, x, p, z)
+                            if fact not in existing:
+                                new_facts.append(fact)
+            elif len(chain) > 2:
+                # Longer chain - recursive join (simplified for now)
+                # TODO: Implement full n-ary property chain
+                pass
+        
+        return new_facts
+    
+    def _apply_owl_different_from(
+        self,
+        vocab: dict,
+        existing: Set[Tuple[TermId, TermId, TermId, TermId]],
+        graph_id: TermId,
+        stats: ReasoningStats,
+    ) -> List[Tuple[TermId, TermId, TermId, TermId]]:
+        """
+        owl:differentFrom symmetry.
+        
+        (x differentFrom y) => (y differentFrom x)
+        """
+        diff_id = vocab.get("differentFrom")
+        if diff_id is None:
+            return []
+        
+        diff_pairs = self._get_facts_with_predicate(diff_id, graph_id)
+        if not diff_pairs:
+            return []
+        
+        new_facts = []
+        for x, y in diff_pairs:
+            fact = (graph_id, y, diff_id, x)
+            if fact not in existing and x != y:
+                new_facts.append(fact)
         
         return new_facts
     

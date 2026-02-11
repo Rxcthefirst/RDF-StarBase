@@ -26,6 +26,7 @@ from rdf_starbase.storage.backup import (
     BackupManifest,
     RestoreOptions,
 )
+from rdf_starbase.storage.repo_config import ReasoningLevel, ReasoningConfig
 
 
 @dataclass
@@ -42,10 +43,15 @@ class RepositoryInfo:
     # Schema version for migrations
     schema_version: int = 1
     
+    # Reasoning configuration (like GraphDB)
+    reasoning_level: str = "none"  # none, rdfs, rdfs_plus, owl_rl
+    materialize_on_load: bool = False
+    
     # Stats (populated on demand)
     triple_count: int = 0
     subject_count: int = 0
     predicate_count: int = 0
+    inferred_count: int = 0
     
     def to_dict(self) -> dict:
         return {
@@ -55,9 +61,12 @@ class RepositoryInfo:
             "tags": self.tags,
             "uuid": self.uuid,
             "schema_version": self.schema_version,
+            "reasoning_level": self.reasoning_level,
+            "materialize_on_load": self.materialize_on_load,
             "triple_count": self.triple_count,
             "subject_count": self.subject_count,
             "predicate_count": self.predicate_count,
+            "inferred_count": self.inferred_count,
         }
     
     @classmethod
@@ -69,9 +78,12 @@ class RepositoryInfo:
             tags=data.get("tags", []),
             uuid=data.get("uuid", str(uuid.uuid4())),
             schema_version=data.get("schema_version", 1),
+            reasoning_level=data.get("reasoning_level", "none"),
+            materialize_on_load=data.get("materialize_on_load", False),
             triple_count=data.get("triple_count", 0),
             subject_count=data.get("subject_count", 0),
             predicate_count=data.get("predicate_count", 0),
+            inferred_count=data.get("inferred_count", 0),
         )
 
 
@@ -153,6 +165,8 @@ class RepositoryManager:
         name: str, 
         description: str = "",
         tags: Optional[list[str]] = None,
+        reasoning_level: str = "none",
+        materialize_on_load: bool = False,
     ) -> RepositoryInfo:
         """
         Create a new repository.
@@ -161,6 +175,8 @@ class RepositoryManager:
             name: Unique repository name (alphanumeric + hyphens)
             description: Human-readable description
             tags: Optional tags for categorization
+            reasoning_level: Inference level - "none", "rdfs", "rdfs_plus", "owl_rl"
+            materialize_on_load: If True, run inference after data load
             
         Returns:
             RepositoryInfo for the new repository
@@ -176,12 +192,19 @@ class RepositoryManager:
         if name in self._info:
             raise ValueError(f"Repository '{name}' already exists")
         
+        # Validate reasoning level
+        valid_levels = {"none", "rdfs", "rdfs_plus", "owl_rl"}
+        if reasoning_level not in valid_levels:
+            raise ValueError(f"Invalid reasoning_level '{reasoning_level}'. Valid options: {valid_levels}")
+        
         # Create repository
         info = RepositoryInfo(
             name=name,
             created_at=datetime.now(timezone.utc),
             description=description,
             tags=tags or [],
+            reasoning_level=reasoning_level,
+            materialize_on_load=materialize_on_load,
         )
         
         self._info[name] = info
@@ -285,6 +308,112 @@ class RepositoryManager:
             info.subject_count = stats.get("unique_subjects", 0)
             info.predicate_count = stats.get("unique_predicates", 0)
         
+        return info
+    
+    def materialize_inferences(self, name: str, level: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Run inference and materialize inferred triples.
+        
+        Similar to GraphDB's materialization - runs the configured reasoner
+        and stores inferred triples with INFERRED flag.
+        
+        Args:
+            name: Repository name
+            level: Override reasoning level (uses repo config if None)
+            
+        Returns:
+            Dict with inference statistics
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+        
+        from rdf_starbase.storage.reasoner import RDFSReasoner
+        
+        info = self._info[name]
+        store = self.get_store(name)
+        
+        # Determine reasoning level
+        reasoning_level = level or info.reasoning_level
+        if reasoning_level == "none":
+            return {"status": "skipped", "reason": "reasoning_level is 'none'"}
+        
+        # Configure reasoner based on level
+        enable_owl = reasoning_level in ("rdfs_plus", "owl_rl")
+        
+        reasoner = RDFSReasoner(
+            term_dict=store._term_dict,
+            fact_store=store._fact_store,
+            enable_owl=enable_owl,
+        )
+        
+        # Run inference
+        stats = reasoner.reason()
+        
+        # Invalidate store cache
+        store._invalidate_cache()
+        
+        # Update info with inferred count
+        info.inferred_count = stats.triples_inferred
+        self._save_metadata(name)
+        
+        return {
+            "status": "success",
+            "reasoning_level": reasoning_level,
+            "iterations": stats.iterations,
+            "triples_inferred": stats.triples_inferred,
+            "rdfs_inferences": {
+                "domain": stats.rdfs2_inferences,
+                "range": stats.rdfs3_inferences,
+                "subPropertyOf_transitivity": stats.rdfs5_inferences,
+                "property_inheritance": stats.rdfs7_inferences,
+                "type_inheritance": stats.rdfs9_inferences,
+                "subClassOf_transitivity": stats.rdfs11_inferences,
+            },
+            "owl_inferences": {
+                "sameAs": stats.owl_same_as_inferences,
+                "equivalentClass": stats.owl_equivalent_class_inferences,
+                "equivalentProperty": stats.owl_equivalent_property_inferences,
+                "inverseOf": stats.owl_inverse_of_inferences,
+                "transitive": stats.owl_transitive_inferences,
+                "symmetric": stats.owl_symmetric_inferences,
+                "functional": stats.owl_functional_inferences,
+                "inverseFunctional": stats.owl_inverse_functional_inferences,
+                "hasValue": stats.owl_has_value_inferences,
+            } if enable_owl else {},
+        }
+    
+    def update_reasoning_config(
+        self, 
+        name: str, 
+        reasoning_level: Optional[str] = None,
+        materialize_on_load: Optional[bool] = None,
+    ) -> RepositoryInfo:
+        """
+        Update reasoning configuration for a repository.
+        
+        Args:
+            name: Repository name
+            reasoning_level: New reasoning level (none/rdfs/rdfs_plus/owl_rl)
+            materialize_on_load: Whether to auto-materialize on data load
+            
+        Returns:
+            Updated RepositoryInfo
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+        
+        info = self._info[name]
+        
+        if reasoning_level is not None:
+            valid_levels = {"none", "rdfs", "rdfs_plus", "owl_rl"}
+            if reasoning_level not in valid_levels:
+                raise ValueError(f"Invalid reasoning_level. Valid: {valid_levels}")
+            info.reasoning_level = reasoning_level
+        
+        if materialize_on_load is not None:
+            info.materialize_on_load = materialize_on_load
+        
+        self._save_metadata(name)
         return info
     
     def list_repositories(self) -> list[RepositoryInfo]:

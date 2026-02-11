@@ -66,6 +66,8 @@ class TriplesMap:
     graph: Optional[str] = None
     # YARRRML-STAR: quoted triple annotations
     annotations: list[dict] = field(default_factory=list)
+    # RDF type declarations (e.g., ["schema:Person", "owl:NamedIndividual"])
+    class_types: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -281,36 +283,77 @@ class ColumnarRDFGenerator:
         df: pl.DataFrame,
         mapping: YARRRMLMapping,
         output_format: OutputFormat = OutputFormat.TURTLE,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> str:
         """
         Generate RDF from DataFrame using YARRRML mapping.
         
+        Args:
+            df: Input DataFrame
+            mapping: Parsed YARRRML mapping
+            output_format: Output RDF format
+            progress_callback: Optional callback(phase, current, total) for progress
+            
         Returns serialized RDF string.
         """
         self.triple_count = 0
         self.warnings = []
         
         if output_format == OutputFormat.NTRIPLES:
-            return self._generate_ntriples(df, mapping)
+            return self._generate_ntriples(df, mapping, progress_callback)
         elif output_format == OutputFormat.TURTLE:
-            return self._generate_turtle(df, mapping)
+            return self._generate_turtle(df, mapping, progress_callback)
         elif output_format == OutputFormat.JSONLD:
-            return self._generate_jsonld(df, mapping)
+            return self._generate_jsonld(df, mapping, progress_callback)
         else:
             # Default to N-Triples (simplest)
-            return self._generate_ntriples(df, mapping)
+            return self._generate_ntriples(df, mapping, progress_callback)
     
     def _generate_ntriples(
         self, 
         df: pl.DataFrame, 
-        mapping: YARRRMLMapping
+        mapping: YARRRMLMapping,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> str:
         """Generate N-Triples format using columnar operations."""
         lines: list[str] = []
+        total_rows = len(df)
+        
+        # Count total operations for progress (include type declarations)
+        total_ops = sum(len(tm.predicate_objects) + len(tm.class_types) for tm in mapping.mappings)
+        completed_ops = 0
         
         for triples_map in mapping.mappings:
             # Generate subject column
             subject_col = self._build_subject_column(df, triples_map.subject)
+            
+            # Generate rdf:type declarations first
+            for class_type in triples_map.class_types:
+                # Expand compact URI to full URI
+                type_uri = self._expand_uri(class_type, mapping.prefixes)
+                type_predicate = '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>'
+                
+                # Create type triples
+                type_df = df.select([
+                    subject_col.alias('s'),
+                    pl.lit(type_predicate).alias('p'),
+                    pl.lit(f'<{type_uri}>').alias('o'),
+                ])
+                
+                type_lines = type_df.select(
+                    pl.concat_str([
+                        pl.col('s'),
+                        pl.lit(' '),
+                        pl.col('p'),
+                        pl.lit(' '),
+                        pl.col('o'),
+                        pl.lit(' .'),
+                    ])
+                ).to_series().to_list()
+                
+                lines.extend(type_lines)
+                self.triple_count += len(type_lines)
+                completed_ops += 1
             
             # For each predicate-object mapping, generate triples
             for po in triples_map.predicate_objects:
@@ -318,6 +361,7 @@ class ColumnarRDFGenerator:
                     self.warnings.append(
                         f"Column '{po.source_column}' not found in data"
                     )
+                    completed_ops += 1
                     continue
                 
                 # Build object column with proper RDF formatting
@@ -349,21 +393,31 @@ class ColumnarRDFGenerator:
                 
                 lines.extend(triple_lines)
                 self.triple_count += len(triple_lines)
+                
+                # Report progress after each predicate-object is processed
+                completed_ops += 1
+                if progress_callback and total_ops > 0:
+                    processed_rows = int((completed_ops / total_ops) * total_rows)
+                    progress_callback("generating triples", processed_rows, total_rows)
         
         return '\n'.join(lines)
     
     def _generate_turtle(
         self, 
         df: pl.DataFrame, 
-        mapping: YARRRMLMapping
+        mapping: YARRRMLMapping,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> str:
         """Generate Turtle format with prefix declarations."""
         output = StringIO()
+        total_rows = len(df)
         
         # Write prefixes
         for prefix, uri in mapping.prefixes.items():
             output.write(f"@prefix {prefix}: <{uri}> .\n")
         output.write('\n')
+        
+        processed_rows = 0
         
         # Group triples by subject for prettier output
         for triples_map in mapping.mappings:
@@ -387,14 +441,23 @@ class ColumnarRDFGenerator:
             ])
             
             # Group by subject
+            row_count = 0
             for row in result_df.iter_rows(named=True):
                 subject = row['__subject__']
                 if not subject:
+                    row_count += 1
                     continue
                 
                 output.write(f"{subject}\n")
                 
                 po_lines = []
+                
+                # Add rdf:type declarations first (use 'a' shorthand)
+                for class_type in triples_map.class_types:
+                    compact_type = self._compact_uri(class_type, mapping.prefixes)
+                    po_lines.append(f"    a {compact_type}")
+                    self.triple_count += 1
+                
                 for i, (predicate, _) in enumerate(po_data):
                     obj = row[f'__obj_{i}__']
                     if obj:
@@ -406,13 +469,25 @@ class ColumnarRDFGenerator:
                 if po_lines:
                     output.write(' ;\n'.join(po_lines))
                     output.write(' .\n\n')
+                
+                row_count += 1
+                # Report progress every 100 rows
+                if progress_callback and row_count % 100 == 0:
+                    progress_callback("generating turtle", row_count, total_rows)
+            
+            processed_rows = row_count
+            
+        # Final progress update
+        if progress_callback:
+            progress_callback("generating turtle", total_rows, total_rows)
         
         return output.getvalue()
     
     def _generate_jsonld(
         self, 
         df: pl.DataFrame, 
-        mapping: YARRRMLMapping
+        mapping: YARRRMLMapping,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> str:
         """Generate JSON-LD format."""
         import json
@@ -421,6 +496,7 @@ class ColumnarRDFGenerator:
         context.update(mapping.prefixes)
         
         graph = []
+        total_rows = len(df)
         
         for triples_map in mapping.mappings:
             subject_col = self._build_subject_column(
@@ -438,12 +514,27 @@ class ColumnarRDFGenerator:
             
             result_df = df.with_columns([subject_col.alias('__subject__')])
             
+            row_count = 0
             for row in result_df.iter_rows(named=True):
                 subject = row['__subject__']
                 if not subject:
+                    row_count += 1
                     continue
                 
                 node = {"@id": subject}
+                
+                # Add @type declarations
+                if triples_map.class_types:
+                    type_values = []
+                    for class_type in triples_map.class_types:
+                        # Expand and use full URI for JSON-LD
+                        full_uri = self._expand_uri(class_type, mapping.prefixes)
+                        type_values.append(full_uri)
+                        self.triple_count += 1
+                    if len(type_values) == 1:
+                        node["@type"] = type_values[0]
+                    else:
+                        node["@type"] = type_values
                 
                 for po in po_data:
                     value = row.get(po.source_column)
@@ -467,6 +558,15 @@ class ColumnarRDFGenerator:
                 
                 if len(node) > 1:  # Has more than just @id
                     graph.append(node)
+                
+                row_count += 1
+                # Report progress every 100 rows
+                if progress_callback and row_count % 100 == 0:
+                    progress_callback("generating json-ld", row_count, total_rows)
+        
+        # Final progress update
+        if progress_callback:
+            progress_callback("generating json-ld", total_rows, total_rows)
         
         return json.dumps({
             "@context": context,
@@ -649,11 +749,57 @@ class ColumnarRDFGenerator:
         )
     
     def _compact_uri(self, uri: str, prefixes: dict[str, str]) -> str:
-        """Compact a full URI using prefixes."""
+        """Compact a full URI using prefixes.
+        
+        Handles:
+        - Full URIs like http://schema.org/name -> schema:name
+        - Already compact URIs like schema:name -> schema:name (unchanged)
+        """
+        # Check if already in compact form (has : but doesn't look like a full URI)
+        if ':' in uri and not uri.startswith(('http://', 'https://', 'urn:', 'file://', '<')):
+            prefix_part = uri.split(':', 1)[0]
+            # Check if the prefix is alphanumeric (valid prefix pattern)
+            if prefix_part.replace('_', '').isalnum():
+                if prefix_part in prefixes:
+                    return uri  # Already valid compact form with declared prefix
+                else:
+                    # Prefix not declared - keep the compact form but warn/add the prefix
+                    # The prefix should have been passed from the ontology
+                    # Return as-is - it's better to have an undeclared prefix error
+                    # than to create invalid Turtle like "<prefix:local>"
+                    return uri
+        
+        # Full URI - try to compact
         for prefix, namespace in prefixes.items():
             if uri.startswith(namespace):
                 return f"{prefix}:{uri[len(namespace):]}"
-        return f"<{uri}>"
+        
+        # Can't compact - wrap in angle brackets (only valid for full URIs)
+        if uri.startswith(('http://', 'https://', 'urn:', 'file://')):
+            return f"<{uri}>"
+        
+        # Unknown format - return as-is rather than creating invalid syntax
+        return uri
+    
+    def _expand_uri(self, uri: str, prefixes: dict[str, str]) -> str:
+        """Expand a compact URI to full URI.
+        
+        Handles:
+        - Compact URIs like schema:name -> http://schema.org/name
+        - Already full URIs like http://schema.org/name -> http://schema.org/name (unchanged)
+        """
+        # Already a full URI
+        if uri.startswith(('http://', 'https://', 'urn:', 'file://')):
+            return uri
+        
+        # Check if it's a compact URI (prefix:local)
+        if ':' in uri:
+            prefix_part, local_part = uri.split(':', 1)
+            if prefix_part in prefixes:
+                return f"{prefixes[prefix_part]}{local_part}"
+        
+        # Can't expand - return as-is
+        return uri
 
 
 # =============================================================================
@@ -694,6 +840,7 @@ class ETLEngine:
         mapping_config: Union[dict, str, Path],
         output_format: OutputFormat = OutputFormat.TURTLE,
         limit: Optional[int] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> tuple[str, dict[str, Any]]:
         """
         Transform tabular data to RDF.
@@ -703,18 +850,36 @@ class ETLEngine:
             mapping_config: YARRRML dict, YAML string, or path to file
             output_format: Output serialization format
             limit: Optional row limit for testing
+            progress_callback: Optional callback(rows_processed, total_rows) for progress updates
             
         Returns:
             Tuple of (rdf_content, report_dict)
         """
         # Load data
         df = self._load_data(Path(data_file), limit)
+        total_rows = len(df)
+        
+        # Report initial progress
+        if progress_callback:
+            progress_callback(0, total_rows)
         
         # Parse mapping
         mapping = self._parse_mapping(mapping_config)
         
+        # Create wrapper callback that captures phase info
+        generator_callback = None
+        if progress_callback:
+            def generator_callback(phase: str, processed: int, total: int):
+                # Store phase info for external access
+                self._current_phase = phase
+                progress_callback(processed, total)
+        
         # Generate RDF
-        rdf_content = self.generator.generate(df, mapping, output_format)
+        rdf_content = self.generator.generate(df, mapping, output_format, generator_callback)
+        
+        # Report completion
+        if progress_callback:
+            progress_callback(total_rows, total_rows)
         
         report = {
             'triple_count': self.generator.triple_count,
@@ -781,12 +946,41 @@ class ETLEngine:
     
     def _dict_to_mapping(self, config: dict) -> YARRRMLMapping:
         """Convert a simple dict mapping to YARRRMLMapping."""
-        prefixes = config.get('prefixes', {
+        # Use provided prefixes, or fall back to comprehensive defaults
+        prefixes = config.get('prefixes', {})
+        
+        # Ensure common prefixes are always available
+        default_prefixes = {
             'ex': 'http://example.org/',
             'schema': 'http://schema.org/',
             'foaf': 'http://xmlns.com/foaf/0.1/',
             'xsd': 'http://www.w3.org/2001/XMLSchema#',
-        })
+            'rdfs': 'http://www.w3.org/2000/01/rdf-schema#',
+            'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+            'owl': 'http://www.w3.org/2002/07/owl#',
+            'skos': 'http://www.w3.org/2004/02/skos/core#',
+        }
+        for prefix, ns in default_prefixes.items():
+            if prefix not in prefixes:
+                prefixes[prefix] = ns
+        
+        # Auto-discover prefixes from predicate URIs in mappings
+        if 'mappings' in config and isinstance(config['mappings'], list):
+            for m in config['mappings']:
+                predicate = m.get('predicate', '')
+                if ':' in predicate and not predicate.startswith(('http://', 'https://')):
+                    # Extract prefix from compact URI
+                    prefix_part, local_part = predicate.split(':', 1)
+                    if prefix_part and prefix_part not in prefixes:
+                        # Try to infer namespace from common patterns
+                        if prefix_part in ['ecom', 'ecommerce']:
+                            prefixes[prefix_part] = 'http://example.org/ecommerce#'
+                        elif prefix_part == 'dc':
+                            prefixes[prefix_part] = 'http://purl.org/dc/elements/1.1/'
+                        elif prefix_part == 'dcterms':
+                            prefixes[prefix_part] = 'http://purl.org/dc/terms/'
+                        elif prefix_part == 'prov':
+                            prefixes[prefix_part] = 'http://www.w3.org/ns/prov#'
         
         # Handle Starchart-style mappings
         if 'mappings' in config and isinstance(config['mappings'], list):
@@ -810,12 +1004,24 @@ class ETLEngine:
             
             source = config.get('sources', [{}])[0].get('file', 'data.csv')
             
+            # Build class type list
+            class_types = []
+            if config.get('class_type'):
+                class_types.append(config['class_type'])
+            if config.get('add_owl_individual', True):  # Default to adding owl:NamedIndividual
+                class_types.append('owl:NamedIndividual')
+            
             triples_map = TriplesMap(
                 name='starchart_mapping',
                 source=source,
                 subject=subject,
                 predicate_objects=po_maps,
+                class_types=class_types,
             )
+            
+            # Ensure owl prefix is available if we're adding NamedIndividual
+            if 'owl:NamedIndividual' in class_types and 'owl' not in prefixes:
+                prefixes['owl'] = 'http://www.w3.org/2002/07/owl#'
             
             return YARRRMLMapping(
                 prefixes=prefixes,

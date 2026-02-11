@@ -12,8 +12,13 @@ from pathlib import Path
 from typing import Optional, Union
 import os
 import time
+import uuid
+import json
+import tempfile
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import polars as pl
 
@@ -30,12 +35,23 @@ class CreateRepositoryRequest(BaseModel):
     name: str = Field(..., description="Unique repository name (alphanumeric, hyphens, underscores)")
     description: str = Field(default="", description="Human-readable description")
     tags: list[str] = Field(default_factory=list, description="Optional tags")
+    # Reasoning configuration (like GraphDB)
+    reasoning_level: str = Field(
+        default="none", 
+        description="Inference level: none, rdfs, rdfs_plus, owl_rl"
+    )
+    materialize_on_load: bool = Field(
+        default=False, 
+        description="Auto-run inference after data loads"
+    )
 
 
 class UpdateRepositoryRequest(BaseModel):
     """Request to update repository metadata."""
     description: Optional[str] = Field(None, description="New description")
     tags: Optional[list[str]] = Field(None, description="New tags")
+    reasoning_level: Optional[str] = Field(None, description="Inference level: none, rdfs, rdfs_plus, owl_rl")
+    materialize_on_load: Optional[bool] = Field(None, description="Auto-run inference after data loads")
 
 
 class RenameRepositoryRequest(BaseModel):
@@ -46,6 +62,7 @@ class RenameRepositoryRequest(BaseModel):
 class SPARQLQueryRequest(BaseModel):
     """SPARQL query for a specific repository."""
     query: str = Field(..., description="SPARQL-Star query string")
+    include_inferred: bool = Field(default=True, description="Include inferred triples in results")
 
 
 class SQLQueryRequest(BaseModel):
@@ -73,6 +90,10 @@ class RepositoryResponse(BaseModel):
     triple_count: int
     subject_count: int
     predicate_count: int
+    # Reasoning configuration
+    reasoning_level: str = "none"
+    materialize_on_load: bool = False
+    inferred_count: int = 0
     
     @classmethod
     def from_info(cls, info: RepositoryInfo) -> "RepositoryResponse":
@@ -84,6 +105,9 @@ class RepositoryResponse(BaseModel):
             triple_count=info.triple_count,
             subject_count=info.subject_count,
             predicate_count=info.predicate_count,
+            reasoning_level=getattr(info, 'reasoning_level', 'none'),
+            materialize_on_load=getattr(info, 'materialize_on_load', False),
+            inferred_count=getattr(info, 'inferred_count', 0),
         )
 
 
@@ -238,7 +262,9 @@ def _parse_rdf_data(data: str, format_type: str):
     """
     Parse RDF data in the specified format.
     
-    Supports all major RDF formats including RDF-Star variants.
+    Uses Oxigraph (Rust) acceleration for Turtle and NTriples when
+    available and the data does not contain RDF-Star syntax.
+    Falls back to hand-written Python parsers otherwise.
     
     Args:
         data: RDF content as string
@@ -250,10 +276,39 @@ def _parse_rdf_data(data: str, format_type: str):
     format_type = format_type.lower().replace('-', '').replace('_', '').replace(' ', '')
     
     if format_type in ("turtle", "ttl", "turtlestar"):
+        # Try Oxigraph (Rust) fast path for non-RDF-Star content
+        has_rdfstar = '<<' in data and '>>' in data
+        if not has_rdfstar:
+            try:
+                from pyoxigraph import parse as oxigraph_parse, RdfFormat
+                quads = list(oxigraph_parse(data.encode('utf-8'), RdfFormat.TURTLE, base_iri="http://example.org/"))
+                triples = []
+                for q in quads:
+                    s = str(q.subject)
+                    p = str(q.predicate)
+                    o = str(q.object)
+                    triples.append({"subject": s, "predicate": p, "object": o})
+                return triples
+            except Exception:
+                pass  # Fall back to Python parser
         from rdf_starbase.formats.turtle import parse_turtle
         return parse_turtle(data)
     
     elif format_type in ("ntriples", "nt", "ntriplesstar"):
+        has_rdfstar = '<<' in data and '>>' in data
+        if not has_rdfstar:
+            try:
+                from pyoxigraph import parse as oxigraph_parse, RdfFormat
+                quads = list(oxigraph_parse(data.encode('utf-8'), RdfFormat.N_TRIPLES, base_iri="http://example.org/"))
+                triples = []
+                for q in quads:
+                    s = str(q.subject)
+                    p = str(q.predicate)
+                    o = str(q.object)
+                    triples.append({"subject": s, "predicate": p, "object": o})
+                return triples
+            except Exception:
+                pass
         from rdf_starbase.formats.ntriples import parse_ntriples
         return parse_ntriples(data)
     
@@ -323,6 +378,15 @@ FORMAT_EXTENSIONS = {
 }
 
 
+# In-memory staging area for uploaded files awaiting processing
+_staged_uploads: dict[str, dict] = {}
+
+
+def _sse(data: dict) -> str:
+    """Format a dict as an SSE event line."""
+    return f"data: {json.dumps(data)}\n\n"
+
+
 def create_repository_router(
     workspace_path: Optional[str | Path] = None
 ) -> tuple[APIRouter, RepositoryManager]:
@@ -360,18 +424,20 @@ def create_repository_router(
     
     @router.post("")
     async def create_repository(request: CreateRepositoryRequest):
-        """Create a new repository."""
+        """Create a new repository with optional reasoning configuration."""
         try:
             info = manager.create(
                 name=request.name,
                 description=request.description,
                 tags=request.tags,
+                reasoning_level=request.reasoning_level,
+                materialize_on_load=request.materialize_on_load,
             )
             # Auto-save after creation
             manager.save(request.name)
             return {
                 "success": True,
-                "message": f"Repository '{request.name}' created",
+                "message": f"Repository '{request.name}' created with reasoning_level='{request.reasoning_level}'",
                 "repository": RepositoryResponse.from_info(info).model_dump()
             }
         except ValueError as e:
@@ -388,13 +454,21 @@ def create_repository_router(
     
     @router.patch("/{name}")
     async def update_repository(name: str, request: UpdateRepositoryRequest):
-        """Update repository metadata."""
+        """Update repository metadata and reasoning configuration."""
         try:
+            # Update basic info
             info = manager.update_info(
                 name=name,
                 description=request.description,
                 tags=request.tags,
             )
+            # Update reasoning config if provided
+            if request.reasoning_level is not None or request.materialize_on_load is not None:
+                info = manager.update_reasoning_config(
+                    name=name,
+                    reasoning_level=request.reasoning_level,
+                    materialize_on_load=request.materialize_on_load,
+                )
             return RepositoryResponse.from_info(info).model_dump()
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
@@ -430,6 +504,59 @@ def create_repository_router(
             if "does not exist" in str(e):
                 raise HTTPException(status_code=404, detail=str(e))
             raise HTTPException(status_code=400, detail=str(e))
+    
+    # =========================================================================
+    # Repository Inference
+    # =========================================================================
+    
+    @router.post("/{name}/inference")
+    async def run_inference(
+        name: str,
+        level: Optional[str] = Query(None, description="Override reasoning level (uses repo config if not set)")
+    ):
+        """
+        Run inference/reasoning on the repository.
+        
+        Materializes inferred triples based on RDFS/OWL rules.
+        Similar to GraphDB's 'Reinfer' operation.
+        """
+        try:
+            result = manager.materialize_inferences(name, level=level)
+            if result.get("triples_inferred", 0) > 0:
+                manager.save(name)
+            return result
+        except ValueError as e:
+            if "does not exist" in str(e):
+                raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
+    
+    @router.get("/{name}/inference/stats")
+    async def get_inference_stats(name: str):
+        """Get inference statistics for a repository."""
+        try:
+            info = manager.get_info(name)
+            store = manager.get_store(name)
+            
+            # Count inferred vs asserted facts
+            df = store._fact_store._df
+            
+            from rdf_starbase.storage.facts import FactFlags
+            inferred_mask = (df["flags"] & FactFlags.INFERRED) != 0
+            inferred_count = inferred_mask.sum()
+            asserted_count = len(df) - inferred_count
+            
+            return {
+                "repository": name,
+                "reasoning_level": info.reasoning_level,
+                "materialize_on_load": info.materialize_on_load,
+                "asserted_count": int(asserted_count),
+                "inferred_count": int(inferred_count),
+                "total_count": len(df),
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
     
     # =========================================================================
     # Repository SPARQL
@@ -472,6 +599,239 @@ def create_repository_router(
                 
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Query error: {str(e)}")
+    
+    # =========================================================================
+    # Repository Ontology Discovery
+    # =========================================================================
+    
+    @router.get("/{name}/ontology")
+    async def get_repository_ontology(name: str):
+        """
+        Extract ontology (classes and properties) from the repository.
+        
+        Queries for RDFS/OWL declarations:
+        - Classes: rdfs:Class, owl:Class
+        - Properties: rdf:Property, rdfs:Property, owl:DatatypeProperty, owl:ObjectProperty
+        - Labels: rdfs:label, skos:altLabel
+        - Descriptions: rdfs:comment
+        - Domain/Range: rdfs:domain, rdfs:range
+        
+        Returns structured data for the Starchart mapper.
+        """
+        try:
+            store = manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        # Query for classes
+        classes_query = """
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+        PREFIX owl: <http://www.w3.org/2002/07/owl#>
+        PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+        PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+        
+        SELECT DISTINCT ?class ?label ?comment WHERE {
+            { ?class a owl:Class }
+            UNION
+            { ?class a rdfs:Class }
+            OPTIONAL { ?class rdfs:label ?label }
+            OPTIONAL { ?class rdfs:comment ?comment }
+            FILTER (!isBlank(?class))
+        }
+        """
+        
+        # Query for properties
+        properties_query = """
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+        PREFIX owl: <http://www.w3.org/2002/07/owl#>
+        PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+        PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+        
+        SELECT DISTINCT ?prop ?label ?comment ?domain ?range WHERE {
+            { ?prop a owl:DatatypeProperty }
+            UNION
+            { ?prop a owl:ObjectProperty }
+            UNION
+            { ?prop a rdf:Property }
+            UNION
+            { ?prop a rdfs:Property }
+            OPTIONAL { ?prop rdfs:label ?label }
+            OPTIONAL { ?prop rdfs:comment ?comment }
+            OPTIONAL { ?prop rdfs:domain ?domain }
+            OPTIONAL { ?prop rdfs:range ?range }
+            FILTER (!isBlank(?prop))
+        }
+        """
+        
+        # Query for aliases (skos:altLabel)
+        aliases_query = """
+        PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+        
+        SELECT ?subject ?alias WHERE {
+            ?subject skos:altLabel ?alias
+        }
+        """
+        
+        try:
+            # Execute queries
+            classes_result = execute_sparql(store, classes_query)
+            properties_result = execute_sparql(store, properties_query)
+            aliases_result = execute_sparql(store, aliases_query)
+            
+            # Build alias lookup
+            aliases_map = {}
+            if isinstance(aliases_result, pl.DataFrame) and len(aliases_result) > 0:
+                for row in aliases_result.to_dicts():
+                    subj = row.get('subject', '')
+                    alias = row.get('alias', '')
+                    if subj and alias:
+                        if subj not in aliases_map:
+                            aliases_map[subj] = []
+                        # Clean up literal formatting
+                        alias_clean = alias.strip('"').split('@')[0].strip('"')
+                        aliases_map[subj].append(alias_clean)
+            
+            # Standard prefixes
+            known_prefixes = {
+                'http://www.w3.org/2001/XMLSchema#': 'xsd',
+                'http://www.w3.org/2000/01/rdf-schema#': 'rdfs',
+                'http://www.w3.org/1999/02/22-rdf-syntax-ns#': 'rdf',
+                'http://www.w3.org/2002/07/owl#': 'owl',
+                'http://xmlns.com/foaf/0.1/': 'foaf',
+                'http://schema.org/': 'schema',
+                'http://purl.org/dc/terms/': 'dcterms',
+                'http://www.w3.org/2004/02/skos/core#': 'skos',
+                'http://www.w3.org/ns/prov#': 'prov',
+            }
+            
+            # Extract namespaces from URIs and build prefix map
+            discovered_namespaces = {}
+            prefix_counter = 0
+            
+            def extract_namespace(uri):
+                """Extract namespace from URI."""
+                if not uri:
+                    return None
+                if '#' in uri:
+                    return uri.rsplit('#', 1)[0] + '#'
+                elif '/' in uri:
+                    return uri.rsplit('/', 1)[0] + '/'
+                return None
+            
+            def get_or_create_prefix(namespace):
+                """Get prefix for namespace, creating one if needed."""
+                nonlocal prefix_counter
+                if not namespace:
+                    return None
+                # Check known prefixes
+                if namespace in known_prefixes:
+                    discovered_namespaces[namespace] = known_prefixes[namespace]
+                    return known_prefixes[namespace]
+                # Check already discovered
+                if namespace in discovered_namespaces:
+                    return discovered_namespaces[namespace]
+                # Create new prefix based on namespace
+                local_hint = namespace.rstrip('#/').rsplit('/', 1)[-1]
+                if local_hint and local_hint[0].isalpha() and len(local_hint) <= 10:
+                    prefix = local_hint.lower().replace('-', '_')
+                else:
+                    prefix = f'ns{prefix_counter}'
+                    prefix_counter += 1
+                discovered_namespaces[namespace] = prefix
+                return prefix
+            
+            # Pre-scan URIs to discover namespaces
+            all_uris = []
+            if isinstance(classes_result, pl.DataFrame) and len(classes_result) > 0:
+                all_uris.extend(row.get('class', '') for row in classes_result.to_dicts())
+            if isinstance(properties_result, pl.DataFrame) and len(properties_result) > 0:
+                for row in properties_result.to_dicts():
+                    all_uris.extend([row.get('prop', ''), row.get('domain', ''), row.get('range', '')])
+            
+            for uri in all_uris:
+                if uri:
+                    ns = extract_namespace(uri)
+                    if ns:
+                        get_or_create_prefix(ns)
+            
+            def compact_uri(uri):
+                """Compact URI using discovered prefixes."""
+                if not uri:
+                    return None
+                ns = extract_namespace(uri)
+                if ns and ns in discovered_namespaces:
+                    prefix = discovered_namespaces[ns]
+                    local = uri[len(ns):]
+                    return f"{prefix}:{local}"
+                # Fall back to full URI
+                return uri
+            
+            def extract_label(uri):
+                if '#' in uri:
+                    return uri.split('#')[-1]
+                elif '/' in uri:
+                    return uri.split('/')[-1]
+                return uri
+            
+            def clean_literal(val):
+                if not val:
+                    return None
+                return val.strip('"').split('@')[0].strip('"').split('^^')[0].strip('"')
+            
+            # Process classes
+            classes = []
+            if isinstance(classes_result, pl.DataFrame) and len(classes_result) > 0:
+                for row in classes_result.to_dicts():
+                    uri = row.get('class', '')
+                    if not uri:
+                        continue
+                    classes.append({
+                        'uri': compact_uri(uri),
+                        'label': clean_literal(row.get('label')) or extract_label(uri),
+                        'description': clean_literal(row.get('comment')),
+                        'properties': [],  # Will be filled by domain matching
+                    })
+            
+            # Process properties
+            properties = []
+            if isinstance(properties_result, pl.DataFrame) and len(properties_result) > 0:
+                for row in properties_result.to_dicts():
+                    uri = row.get('prop', '')
+                    if not uri:
+                        continue
+                    
+                    domain = row.get('domain')
+                    domain_compact = compact_uri(domain) if domain else None
+                    
+                    prop_obj = {
+                        'uri': compact_uri(uri),
+                        'label': clean_literal(row.get('label')) or extract_label(uri),
+                        'aliases': aliases_map.get(uri, []),
+                        'description': clean_literal(row.get('comment')),
+                        'domain': domain_compact,
+                        'range': compact_uri(row.get('range')) if row.get('range') else 'xsd:string',
+                    }
+                    properties.append(prop_obj)
+                    
+                    # Associate property with class by domain
+                    if domain_compact:
+                        for cls in classes:
+                            if cls['uri'] == domain_compact:
+                                cls['properties'].append(prop_obj['uri'])
+            
+            return {
+                'success': True,
+                'repository': name,
+                'classes': classes,
+                'properties': properties,
+                'class_count': len(classes),
+                'property_count': len(properties),
+                # Return inverted prefix map (prefix -> namespace)
+                'prefixes': {prefix: ns for ns, prefix in discovered_namespaces.items()},
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to extract ontology: {str(e)}")
     
     # =========================================================================
     # Repository Triple Management
@@ -772,6 +1132,8 @@ def create_repository_router(
                 prov_groups[prov_key].append((s, p, o))
             
             # Batch columnar insert for each provenance group
+            # Use bulk insert mode to defer DataFrame concat
+            store.begin_bulk_insert()
             count = 0
             for (source, confidence), triples_list in prov_groups.items():
                 subjects = [t[0] for t in triples_list]
@@ -785,6 +1147,7 @@ def create_repository_router(
                     confidence=confidence,
                     graph=target_graph,
                 )
+            store.end_bulk_insert()
             
             insert_time = time.time() - insert_start
             
@@ -810,7 +1173,202 @@ def create_repository_router(
             }
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
-    
+
+    # =========================================================================
+    # Staged Upload with Progress (two-phase)
+    # =========================================================================
+
+    @router.post("/{name}/upload-stage")
+    async def upload_stage(
+        name: str,
+        file: UploadFile = File(...),
+        format: str = Form(None),
+        graph_target: str = Form(None),
+    ):
+        """
+        Phase 1: Stage a file upload. Saves the file to a temp location
+        and returns a stage_id. Use GET /{name}/upload-process/{stage_id}
+        to start processing with SSE progress events.
+        """
+        try:
+            manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        # Auto-detect format
+        if not format:
+            ext = file.filename.split('.')[-1].lower() if file.filename else ''
+            format = FORMAT_EXTENSIONS.get(ext, 'turtle')
+
+        content = await file.read()
+        stage_id = str(uuid.uuid4())
+
+        _staged_uploads[stage_id] = {
+            "content": content,
+            "filename": file.filename,
+            "format": format,
+            "graph_target": graph_target,
+            "repo_name": name,
+            "size": len(content),
+            "staged_at": time.time(),
+        }
+
+        return {
+            "stage_id": stage_id,
+            "filename": file.filename,
+            "size": len(content),
+            "format": format,
+        }
+
+    @router.get("/{name}/upload-process/{stage_id}")
+    async def upload_process(name: str, stage_id: str):
+        """
+        Phase 2: Process a staged upload with SSE progress events.
+        Streams events: parsing, inserting (with progress/ETA), done, error.
+        """
+        if stage_id not in _staged_uploads:
+            raise HTTPException(status_code=404, detail="Stage ID not found or expired")
+
+        staged = _staged_uploads.pop(stage_id)
+        if staged["repo_name"] != name:
+            raise HTTPException(status_code=400, detail="Repository mismatch")
+
+        async def event_stream():
+            try:
+                store = manager.get_store(name)
+                content = staged["content"]
+                fmt = staged["format"]
+                filename = staged["filename"]
+                graph_target = staged.get("graph_target")
+                target_graph = _resolve_graph_target(graph_target, filename)
+
+                # --- Phase: Parsing ---
+                yield _sse({"phase": "parsing", "progress": 0, "message": "Parsing RDF data..."})
+                await asyncio.sleep(0)  # yield control
+
+                parse_start = time.time()
+                if fmt == "binaryrdf":
+                    triples = _parse_binary_rdf(content)
+                else:
+                    data = content.decode('utf-8')
+                    triples = _parse_rdf_data(data, fmt)
+                parse_time = time.time() - parse_start
+
+                total_triples = len(triples)
+                yield _sse({"phase": "parsing", "progress": 100, "total_triples": total_triples,
+                            "parse_seconds": round(parse_time, 3),
+                            "message": f"Parsed {total_triples:,} triples in {parse_time:.2f}s"})
+                await asyncio.sleep(0)
+
+                # --- Phase: Preparing ---
+                default_source = f"file:{filename}"
+                rdfstar_data = extract_rdfstar_annotations(triples, default_source=default_source)
+                base_triples = rdfstar_data["base_triples"]
+                annotations = rdfstar_data["annotations"]
+
+                # Flatten all triples into a single insertion list with provenance
+                all_items = []
+                for s, p, o in base_triples:
+                    key = (s, p, o)
+                    if key in annotations:
+                        ann = annotations[key]
+                        source = ann.get("source", default_source)
+                        confidence = ann.get("confidence", 1.0)
+                    else:
+                        source = default_source
+                        confidence = 1.0
+                    all_items.append((s, p, o, source, confidence))
+
+                total_items = len(all_items)
+                if total_items == 0:
+                    yield _sse({"phase": "done", "progress": 100, "triples_added": 0,
+                                "message": "No triples found in file"})
+                    return
+
+                # --- Phase: Inserting (chunked with progress) ---
+                CHUNK_SIZE = max(500, total_items // 100)  # ~100 progress updates max
+                count = 0
+                insert_start = time.time()
+
+                # Enable deferred concat for O(1) per-chunk inserts
+                store.begin_bulk_insert()
+
+                # Group into provenance batches within each chunk
+                for chunk_start in range(0, total_items, CHUNK_SIZE):
+                    chunk = all_items[chunk_start : chunk_start + CHUNK_SIZE]
+
+                    # Group chunk by (source, confidence)
+                    prov_groups: dict[tuple, list] = {}
+                    for s, p, o, src, conf in chunk:
+                        key = (src, conf)
+                        if key not in prov_groups:
+                            prov_groups[key] = []
+                        prov_groups[key].append((s, p, o))
+
+                    for (source, confidence), triples_list in prov_groups.items():
+                        subjects = [t[0] for t in triples_list]
+                        predicates = [t[1] for t in triples_list]
+                        objects = [t[2] for t in triples_list]
+                        count += store.add_triples_columnar(
+                            subjects=subjects,
+                            predicates=predicates,
+                            objects=objects,
+                            source=source,
+                            confidence=confidence,
+                            graph=target_graph,
+                        )
+
+                    elapsed = time.time() - insert_start
+                    progress = round((count / total_items) * 100)
+                    rate = count / elapsed if elapsed > 0 else 0
+                    remaining = total_items - count
+                    eta = round(remaining / rate, 1) if rate > 0 else None
+
+                    yield _sse({
+                        "phase": "inserting",
+                        "progress": progress,
+                        "triples_inserted": count,
+                        "total_triples": total_items,
+                        "triples_per_second": round(rate),
+                        "eta_seconds": eta,
+                        "message": f"Inserted {count:,} / {total_items:,} triples",
+                    })
+                    await asyncio.sleep(0)  # yield control for SSE flush
+
+                # Single concat for all buffered DataFrames
+                store.end_bulk_insert()
+
+                # --- Phase: Saving ---
+                yield _sse({"phase": "saving", "progress": 100, "message": "Saving repository..."})
+                await asyncio.sleep(0)
+                manager.save(name)
+
+                insert_time = time.time() - insert_start
+                total_time = parse_time + insert_time
+                triples_per_sec = count / total_time if total_time > 0 else 0
+
+                yield _sse({
+                    "phase": "done",
+                    "progress": 100,
+                    "triples_added": count,
+                    "total_triples": total_items,
+                    "timing": {
+                        "parse_seconds": round(parse_time, 3),
+                        "insert_seconds": round(insert_time, 3),
+                        "total_seconds": round(total_time, 3),
+                        "triples_per_second": round(triples_per_sec),
+                    },
+                    "message": f"Imported {count:,} triples in {total_time:.2f}s",
+                })
+            except Exception as e:
+                yield _sse({"phase": "error", "message": str(e)})
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @router.get("/{name}/export")
     async def export_data(
         name: str,

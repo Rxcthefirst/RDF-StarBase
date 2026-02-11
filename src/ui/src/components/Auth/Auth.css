@@ -1,0 +1,365 @@
+/* =============================================================================
+   Authentication Components Styles
+   ============================================================================= */
+
+/* Login Page */
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  padding: 20px;
+}
+
+.login-page.loading {
+  flex-direction: column;
+  color: #e0e0e0;
+}
+
+.login-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  padding: 40px;
+  max-width: 400px;
+  width: 100%;
+  backdrop-filter: blur(10px);
+}
+
+.login-header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.login-header h1 {
+  color: #fff;
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.login-header p {
+  color: #a0a0a0;
+  font-size: 0.9rem;
+}
+
+.login-error {
+  background: rgba(255, 82, 82, 0.1);
+  border: 1px solid rgba(255, 82, 82, 0.3);
+  color: #ff5252;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.login-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-providers > p {
+  color: #a0a0a0;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.provider-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 20px;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.provider-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+}
+
+.provider-btn:active {
+  transform: translateY(0);
+}
+
+.no-providers {
+  text-align: center;
+  color: #a0a0a0;
+  padding: 20px;
+}
+
+.no-providers .hint {
+  font-size: 0.85rem;
+  margin-top: 10px;
+  opacity: 0.7;
+}
+
+.login-footer {
+  margin-top: 30px;
+  text-align: center;
+  color: #606060;
+  font-size: 0.8rem;
+}
+
+/* Auth Loading/Redirect States */
+.auth-loading,
+.auth-redirect {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: var(--text-secondary, #a0a0a0);
+}
+
+.auth-forbidden {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.auth-forbidden h2 {
+  color: #ff5252;
+  margin-bottom: 10px;
+}
+
+/* Spinner */
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 15px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Session Timeout Warning */
+.session-warning {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9999;
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.warning-content {
+  background: rgba(255, 152, 0, 0.95);
+  color: #000;
+  padding: 16px 20px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.warning-content p {
+  margin: 0;
+  font-weight: 500;
+}
+
+.warning-content .btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.warning-content .btn.primary {
+  background: #fff;
+  color: #ff9800;
+}
+
+.warning-content .btn.secondary {
+  background: rgba(0, 0, 0, 0.2);
+  color: #fff;
+}
+
+/* User Menu */
+.user-menu {
+  position: relative;
+}
+
+.user-menu-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: var(--text-primary, #e0e0e0);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.user-menu-trigger:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.user-avatar {
+  font-size: 1.2rem;
+}
+
+.user-name {
+  font-weight: 500;
+}
+
+.user-role {
+  font-size: 0.75rem;
+  padding: 2px 6px;
+  background: rgba(99, 102, 241, 0.2);
+  border-radius: 4px;
+  color: #8b5cf6;
+}
+
+.user-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  background: var(--bg-secondary, #1e1e2e);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.menu-header {
+  padding: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.menu-header strong {
+  display: block;
+  color: var(--text-primary, #e0e0e0);
+  margin-bottom: 4px;
+}
+
+.menu-header .email {
+  font-size: 0.85rem;
+  color: var(--text-secondary, #a0a0a0);
+}
+
+.menu-items {
+  padding: 8px;
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  background: none;
+  color: var(--text-primary, #e0e0e0);
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.2s;
+}
+
+.menu-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.menu-item.info {
+  cursor: default;
+  font-size: 0.85rem;
+  color: var(--text-secondary, #a0a0a0);
+}
+
+.menu-item.info:hover {
+  background: none;
+}
+
+.menu-item.logout {
+  color: #ff5252;
+}
+
+.menu-items hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  margin: 8px 0;
+}
+
+/* Role Badges */
+.role-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.role-badge.reader {
+  background: rgba(76, 175, 80, 0.2);
+  color: #4caf50;
+}
+
+.role-badge.writer {
+  background: rgba(33, 150, 243, 0.2);
+  color: #2196f3;
+}
+
+.role-badge.admin {
+  background: rgba(156, 39, 176, 0.2);
+  color: #9c27b0;
+}
+
+/* Light Theme Overrides */
+.light .login-page {
+  background: linear-gradient(135deg, #f5f5f5 0%, #e0e0e0 100%);
+}
+
+.light .login-card {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+
+.light .login-header h1 {
+  color: #1a1a2e;
+}
+
+.light .user-menu-trigger {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #333;
+}
+
+.light .user-menu-dropdown {
+  background: #fff;
+  border-color: rgba(0, 0, 0, 0.1);
+}

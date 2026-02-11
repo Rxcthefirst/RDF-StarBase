@@ -101,6 +101,9 @@ class FactStore:
         # Facts DataFrame with integer columns
         self._df = self._create_empty_dataframe()
         
+        # Batch buffer for deferred concat (None = immediate mode)
+        self._batch_buffer: Optional[list] = None
+        
         # Pre-intern the default graph marker
         self._default_graph_id = DEFAULT_GRAPH_ID
     
@@ -251,7 +254,10 @@ class FactStore:
             "process": pl.UInt64,
         })
         
-        self._df = pl.concat([self._df, new_df], how="vertical")
+        if self._batch_buffer is not None:
+            self._batch_buffer.append(new_df)
+        else:
+            self._df = pl.concat([self._df, new_df], how="vertical")
         return txn
     
     def add_facts_columnar(
@@ -306,8 +312,27 @@ class FactStore:
             pl.lit(process if process else 0).cast(pl.UInt64).alias("process"),
         ])
         
-        self._df = pl.concat([self._df, new_df], how="vertical")
+        if self._batch_buffer is not None:
+            self._batch_buffer.append(new_df)
+        else:
+            self._df = pl.concat([self._df, new_df], how="vertical")
         return txn
+
+    def begin_batch(self) -> None:
+        """Begin batched insertion mode. DataFrames are buffered and concatenated once on flush."""
+        self._batch_buffer = []
+
+    def flush_batch(self) -> int:
+        """Flush all buffered DataFrames in a single concat (avoids O(n²) repeated copies)."""
+        if self._batch_buffer is None:
+            return 0
+        buf = self._batch_buffer
+        self._batch_buffer = None
+        if not buf:
+            return 0
+        combined = pl.concat(buf, how="vertical")
+        self._df = pl.concat([self._df, combined], how="vertical")
+        return len(combined)
 
     def add_facts_with_provenance(
         self,

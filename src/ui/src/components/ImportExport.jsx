@@ -53,45 +53,142 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
     setImportFormat(detectedFormat)
   }
 
-  // Fast file upload using multipart form
-  const handleFileUpload = async () => {
+  // Helper: format seconds as human-readable duration
+  const formatEta = (seconds) => {
+    if (seconds == null) return ''
+    if (seconds < 60) return `${Math.ceil(seconds)}s remaining`
+    const m = Math.floor(seconds / 60)
+    const s = Math.ceil(seconds % 60)
+    return `${m}m ${s}s remaining`
+  }
+
+  // Two-phase upload:
+  //   Phase 1 — XHR to /upload-stage (byte-level upload progress)
+  //   Phase 2 — EventSource on /upload-process/{stage_id} (parse/insert progress + ETA)
+  const handleFileUpload = () => {
     if (!repositoryName || !selectedFile) return
 
-    try {
-      setImporting(true)
-      setError(null)
-      setSuccess(null)
-      setUploadProgress('Uploading...')
+    setImporting(true)
+    setError(null)
+    setSuccess(null)
+    setUploadProgress({ phase: 'uploading', percent: 0 })
 
-      const formData = new FormData()
-      formData.append('file', selectedFile)
-      formData.append('format', importFormat)
+    const formData = new FormData()
+    formData.append('file', selectedFile)
+    formData.append('format', importFormat)
 
-      const response = await fetch(`${API_BASE}/repositories/${repositoryName}/upload`, {
-        method: 'POST',
-        body: formData
-      })
+    const xhr = new XMLHttpRequest()
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}))
-        throw new Error(errData.detail || 'Upload failed')
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        const percent = Math.round((event.loaded / event.total) * 100)
+        setUploadProgress({ phase: 'uploading', percent })
       }
+    }
 
-      const result = await response.json()
-      const timing = result.timing || {}
-      setSuccess(
-        `✓ Imported ${result.triples_added?.toLocaleString() || 0} triples\n` +
-        `⚡ ${timing.triples_per_second?.toLocaleString() || 0} triples/sec\n` +
-        `⏱ Parse: ${timing.parse_seconds || 0}s, Insert: ${timing.insert_seconds || 0}s`
-      )
-      setSelectedFile(null)
+    xhr.upload.onload = () => {
+      setUploadProgress({ phase: 'staging', percent: 100, message: 'File received, staging…' })
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const result = JSON.parse(xhr.responseText)
+          const stageId = result.stage_id
+          if (!stageId) {
+            setError('Server did not return a stage ID')
+            setUploadProgress(null)
+            setImporting(false)
+            return
+          }
+          // Phase 2: stream processing progress via SSE
+          startProcessingStream(stageId)
+        } catch {
+          setError('Failed to parse staging response')
+          setUploadProgress(null)
+          setImporting(false)
+        }
+      } else {
+        try {
+          const errData = JSON.parse(xhr.responseText)
+          setError(errData.detail || 'Upload staging failed')
+        } catch {
+          setError(`Upload failed (HTTP ${xhr.status})`)
+        }
+        setUploadProgress(null)
+        setImporting(false)
+      }
+    }
+
+    xhr.onerror = () => {
+      setError('Network error during upload')
       setUploadProgress(null)
-      if (fileInputRef.current) fileInputRef.current.value = ''
-      if (onDataChanged) onDataChanged()
-    } catch (err) {
-      setError(err.message)
+      setImporting(false)
+    }
+
+    xhr.onabort = () => {
       setUploadProgress(null)
-    } finally {
+      setImporting(false)
+    }
+
+    xhr.open('POST', `${API_BASE}/repositories/${repositoryName}/upload-stage`)
+    xhr.send(formData)
+  }
+
+  // SSE stream for Phase 2 — parsing, inserting, saving, done
+  const startProcessingStream = (stageId) => {
+    const evtSource = new EventSource(
+      `${API_BASE}/repositories/${repositoryName}/upload-process/${stageId}`
+    )
+
+    evtSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        const { phase, progress, triples_inserted, total_triples, triples_per_second, eta_seconds, message } = data
+
+        if (phase === 'done') {
+          evtSource.close()
+          const t = data.timing || {}
+          setSuccess(
+            `✓ Imported ${data.triples_added?.toLocaleString() || 0} triples\n` +
+            `⚡ ${t.triples_per_second?.toLocaleString() || 0} triples/sec\n` +
+            `⏱ Parse: ${t.parse_seconds || 0}s, Insert: ${t.insert_seconds || 0}s`
+          )
+          setSelectedFile(null)
+          setUploadProgress(null)
+          setImporting(false)
+          if (fileInputRef.current) fileInputRef.current.value = ''
+          if (onDataChanged) onDataChanged()
+          return
+        }
+
+        if (phase === 'error') {
+          evtSource.close()
+          setError(message || 'Processing failed')
+          setUploadProgress(null)
+          setImporting(false)
+          return
+        }
+
+        // Update progress state for parsing / inserting / saving
+        setUploadProgress({
+          phase,
+          percent: progress ?? 0,
+          triplesInserted: triples_inserted,
+          totalTriples: total_triples,
+          triplesPerSecond: triples_per_second,
+          etaSeconds: eta_seconds,
+          message,
+        })
+      } catch {
+        // ignore malformed events
+      }
+    }
+
+    evtSource.onerror = () => {
+      evtSource.close()
+      setError('Lost connection to server during processing')
+      setUploadProgress(null)
       setImporting(false)
     }
   }
@@ -248,7 +345,7 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
               Choose File
             </button>
             <span className="ie-file-name">
-              {selectedFile ? `${selectedFile.name} (${(selectedFile.size / 1024).toFixed(1)} KB)` : 'No file selected'}
+              {selectedFile ? `${selectedFile.name} (${selectedFile.size > 1048576 ? (selectedFile.size / 1048576).toFixed(1) + ' MB' : (selectedFile.size / 1024).toFixed(1) + ' KB'})` : 'No file selected'}
             </span>
           </div>
 
@@ -258,8 +355,47 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
               onClick={handleFileUpload}
               disabled={importing || !repositoryName}
             >
-              {importing ? (uploadProgress || 'Importing...') : 'Import File'}
+              {importing
+                ? (() => {
+                    const p = uploadProgress
+                    if (!p) return 'Importing...'
+                    if (p.phase === 'uploading') return `Uploading ${p.percent}%`
+                    if (p.phase === 'staging') return '📦 Staging...'
+                    if (p.phase === 'parsing') return '🔍 Parsing...'
+                    if (p.phase === 'inserting') return `💾 Inserting ${p.percent}%`
+                    if (p.phase === 'saving') return '💾 Saving...'
+                    return 'Processing...'
+                  })()
+                : 'Import File'}
             </button>
+          )}
+
+          {uploadProgress && (
+            <div className="ie-progress-container">
+              <div className="ie-progress-bar">
+                <div
+                  className={`ie-progress-fill ${uploadProgress.phase === 'parsing' || uploadProgress.phase === 'saving' || uploadProgress.phase === 'staging' ? 'ie-progress-pulse' : ''}`}
+                  style={{ width: `${uploadProgress.percent}%` }}
+                />
+              </div>
+              <div className="ie-progress-details">
+                <span className="ie-progress-label">
+                  {uploadProgress.phase === 'uploading' && `Uploading file… ${uploadProgress.percent}%`}
+                  {uploadProgress.phase === 'staging' && 'File received, preparing…'}
+                  {uploadProgress.phase === 'parsing' && (uploadProgress.message || 'Parsing RDF data…')}
+                  {uploadProgress.phase === 'inserting' && (
+                    `${uploadProgress.triplesInserted?.toLocaleString() || 0} / ${uploadProgress.totalTriples?.toLocaleString() || '?'} triples`
+                  )}
+                  {uploadProgress.phase === 'saving' && 'Saving repository…'}
+                </span>
+                {uploadProgress.phase === 'inserting' && (
+                  <span className="ie-progress-meta">
+                    {uploadProgress.triplesPerSecond?.toLocaleString() || 0} triples/sec
+                    {uploadProgress.etaSeconds != null && ` · ${formatEta(uploadProgress.etaSeconds)}`}
+                  </span>
+                )}
+              </div>
+            </div>
           )}
 
           {selectedFile && !repositoryName && (
@@ -561,6 +697,63 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
           color: #f9a825;
           padding: 0.5rem;
           text-align: center;
+        }
+
+        .ie-progress-container {
+          display: flex;
+          flex-direction: column;
+          gap: 0.35rem;
+        }
+
+        .ie-progress-bar {
+          width: 100%;
+          height: 8px;
+          border-radius: 4px;
+          overflow: hidden;
+        }
+
+        .import-export.dark .ie-progress-bar {
+          background: #313244;
+        }
+
+        .import-export.light .ie-progress-bar {
+          background: #dee2e6;
+        }
+
+        .ie-progress-fill {
+          height: 100%;
+          border-radius: 4px;
+          background: var(--accent-color);
+          transition: width 0.2s ease;
+        }
+
+        .ie-progress-pulse {
+          animation: ie-pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes ie-pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+
+        .ie-progress-label {
+          font-size: 0.75rem;
+          opacity: 0.7;
+          text-align: center;
+        }
+
+        .ie-progress-details {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 0.25rem;
+        }
+
+        .ie-progress-meta {
+          font-size: 0.7rem;
+          opacity: 0.55;
+          font-variant-numeric: tabular-nums;
         }
       `}</style>
     </div>

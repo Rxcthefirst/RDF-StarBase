@@ -759,6 +759,24 @@ class SPARQLExecutor:
         
         where = query.where
         
+        # Reject queries with GRAPH patterns (not yet supported in integer executor)
+        if where.graph_patterns:
+            return False
+        
+        # Reject queries with BIND clauses (not supported in integer executor)
+        if where.binds:
+            return False
+        
+        # Reject queries with subselects (not supported in integer executor)
+        if where.subselects:
+            return False
+        
+        # Reject queries with UNION alternatives that have BINDs
+        for union in where.union_patterns:
+            for alt in union.alternatives:
+                if isinstance(alt, dict) and alt.get('binds'):
+                    return False
+        
         # Check for unsupported patterns
         for pattern in where.patterns:
             if isinstance(pattern, GraphPattern):
@@ -807,6 +825,11 @@ class SPARQLExecutor:
                     return True
         
         if isinstance(expr, Comparison):
+            # Recursively check left and right sides for string functions
+            if self._filter_needs_strings(expr.left):
+                return True
+            if self._filter_needs_strings(expr.right):
+                return True
             # Check if comparing with a string literal (non-numeric)
             for term in (expr.left, expr.right):
                 if isinstance(term, Literal):

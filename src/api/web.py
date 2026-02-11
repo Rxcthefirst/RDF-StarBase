@@ -469,6 +469,7 @@ def create_sql_router(store: TripleStore) -> APIRouter:
         return {
             "description": "SQL query templates for accessing claims in the triplestore",
             "queries": [
+                # Basic Queries
                 {
                     "name": "All Triples",
                     "description": "Get all triples with provenance information",
@@ -476,10 +477,99 @@ def create_sql_router(store: TripleStore) -> APIRouter:
                     "category": "basic"
                 },
                 {
+                    "name": "Distinct Subjects",
+                    "description": "List all unique subjects (entities) in the graph",
+                    "sql": "SELECT DISTINCT subject FROM triples ORDER BY subject LIMIT 500",
+                    "category": "basic"
+                },
+                {
+                    "name": "Distinct Predicates",
+                    "description": "List all unique predicates (properties) in the graph",
+                    "sql": "SELECT DISTINCT predicate FROM triples ORDER BY predicate",
+                    "category": "basic"
+                },
+                {
+                    "name": "Entity Properties",
+                    "description": "Get all properties for a specific entity (change the WHERE clause)",
+                    "sql": "SELECT predicate, object, source, confidence\nFROM triples\nWHERE subject LIKE '%example%'\nORDER BY predicate",
+                    "category": "basic"
+                },
+                # Analytics Queries
+                {
                     "name": "Count by Predicate",
                     "description": "Count how many times each predicate is used",
                     "sql": "SELECT predicate, COUNT(*) as count FROM triples GROUP BY predicate ORDER BY count DESC",
                     "category": "analytics"
+                },
+                {
+                    "name": "Count by Subject",
+                    "description": "Find entities with the most properties",
+                    "sql": "SELECT subject, COUNT(*) as property_count\nFROM triples\nGROUP BY subject\nORDER BY property_count DESC\nLIMIT 50",
+                    "category": "analytics"
+                },
+                {
+                    "name": "Triple Statistics",
+                    "description": "Get overall statistics about the triplestore",
+                    "sql": "SELECT\n  COUNT(*) as total_triples,\n  COUNT(DISTINCT subject) as unique_subjects,\n  COUNT(DISTINCT predicate) as unique_predicates,\n  COUNT(DISTINCT object) as unique_objects\nFROM triples",
+                    "category": "analytics"
+                },
+                # Provenance Queries
+                {
+                    "name": "Claims by Source",
+                    "description": "Count claims grouped by source system",
+                    "sql": "SELECT source, COUNT(*) as claim_count, AVG(confidence) as avg_confidence\nFROM triples\nWHERE source IS NOT NULL\nGROUP BY source\nORDER BY claim_count DESC",
+                    "category": "provenance"
+                },
+                {
+                    "name": "Source Coverage",
+                    "description": "Analyze which predicates each source provides",
+                    "sql": "SELECT source,\n  COUNT(DISTINCT predicate) as predicate_types,\n  COUNT(*) as total_claims\nFROM triples\nWHERE source IS NOT NULL\nGROUP BY source\nORDER BY total_claims DESC",
+                    "category": "provenance"
+                },
+                {
+                    "name": "Recent Claims",
+                    "description": "Get the most recently added claims by timestamp",
+                    "sql": "SELECT subject, predicate, object, source, timestamp\nFROM triples\nWHERE timestamp IS NOT NULL\nORDER BY timestamp DESC\nLIMIT 50",
+                    "category": "provenance"
+                },
+                # Quality Queries
+                {
+                    "name": "Low Confidence Claims",
+                    "description": "Find claims with confidence below 0.8",
+                    "sql": "SELECT subject, predicate, object, source, confidence\nFROM triples\nWHERE confidence < 0.8\nORDER BY confidence ASC\nLIMIT 50",
+                    "category": "quality"
+                },
+                {
+                    "name": "High Confidence Claims",
+                    "description": "Find claims with confidence above 0.9",
+                    "sql": "SELECT subject, predicate, object, source, confidence\nFROM triples\nWHERE confidence >= 0.9\nORDER BY confidence DESC\nLIMIT 50",
+                    "category": "quality"
+                },
+                {
+                    "name": "Missing Confidence",
+                    "description": "Find claims without confidence scores",
+                    "sql": "SELECT subject, predicate, object, source\nFROM triples\nWHERE confidence IS NULL\nLIMIT 100",
+                    "category": "quality"
+                },
+                # Search Queries
+                {
+                    "name": "Text Search",
+                    "description": "Search for entities or values containing text",
+                    "sql": "SELECT subject, predicate, object, source\nFROM triples\nWHERE subject LIKE '%search_term%'\n   OR object LIKE '%search_term%'\nLIMIT 50",
+                    "category": "search"
+                },
+                {
+                    "name": "Find by Type",
+                    "description": "Find all entities of a specific RDF type",
+                    "sql": "SELECT subject, object as type\nFROM triples\nWHERE predicate LIKE '%type%'\n   OR predicate LIKE '%rdf-syntax-ns#type%'\nLIMIT 100",
+                    "category": "search"
+                },
+                # Schema Queries  
+                {
+                    "name": "Predicate Domain/Range",
+                    "description": "Analyze subject and object patterns for each predicate",
+                    "sql": "SELECT predicate,\n  COUNT(DISTINCT subject) as distinct_subjects,\n  COUNT(DISTINCT object) as distinct_objects,\n  COUNT(*) as usage_count\nFROM triples\nGROUP BY predicate\nORDER BY usage_count DESC",
+                    "category": "schema"
                 },
             ]
         }
@@ -508,22 +598,76 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
     Returns:
         Configured FastAPI application
     """
+    # Check if running in production mode
+    production_mode = os.getenv("RDFSTARBASE_PRODUCTION", "false").lower() == "true"
+    
+    # Get allowed origins from env (comma-separated) or use defaults
+    allowed_origins_env = os.getenv("RDFSTARBASE_CORS_ORIGINS", "")
+    if allowed_origins_env:
+        allowed_origins = [o.strip() for o in allowed_origins_env.split(",")]
+    elif production_mode:
+        # In production, only allow same-origin by default
+        allowed_origins = []
+    else:
+        # Development mode - allow all
+        allowed_origins = ["*"]
+    
     app = FastAPI(
         title="RDF-StarBase API",
         description="A blazingly fast RDF★ database with native provenance tracking",
         version="0.3.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url="/docs" if not production_mode else None,  # Disable docs in production
+        redoc_url="/redoc" if not production_mode else None,
     )
     
-    # Add CORS middleware
+    # Add CORS middleware with configurable origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-CSRF-Token"],
     )
+    
+    # Security headers middleware
+    @app.middleware("http")
+    async def add_security_headers(request, call_next):
+        response = await call_next(request)
+        
+        # Prevent clickjacking
+        response.headers["X-Frame-Options"] = "DENY"
+        
+        # Prevent MIME type sniffing
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        
+        # XSS protection (legacy browsers)
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        
+        # Referrer policy
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        
+        # Permissions policy (disable dangerous features)
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        
+        # HSTS - only in production with HTTPS
+        if production_mode:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        
+        # Content Security Policy
+        csp_directives = [
+            "default-src 'self'",
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval'",  # unsafe-eval for dev tools
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data: blob:",
+            "font-src 'self' data:",
+            "connect-src 'self' https://*.okta.com https://*.auth0.com https://*.azure.com",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+            "form-action 'self'",
+        ]
+        response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
+        
+        return response
     
     # State
     app.state.store = store or TripleStore()
@@ -552,6 +696,19 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
     oidc_router, oidc_manager = create_oidc_router()
     app.include_router(oidc_router)
     app.state.oidc_manager = oidc_manager  # May be None if PyJWT not installed
+    
+    # Add Browser Auth router (OAuth2 flow for browser-based SPA)
+    try:
+        from api.browser_auth import create_browser_auth_router
+        browser_auth_router, session_manager = create_browser_auth_router(
+            oidc_manager=oidc_manager  # Pass OIDC manager for OAuth flows
+        )
+        app.include_router(browser_auth_router)
+        app.state.session_manager = session_manager
+    except Exception as e:
+        # Log but don't fail - browser auth is optional
+        import logging
+        logging.getLogger(__name__).warning(f"Browser auth not available: {e}")
     
     # Add SQL/DuckDB router
     sql_router = create_sql_router(app.state.store)

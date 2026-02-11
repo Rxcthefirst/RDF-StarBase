@@ -223,6 +223,7 @@ class StoragePersistence:
         fact_store._qt_dict = qt_dict
         fact_store._next_txn = 0
         fact_store._default_graph_id = 0
+        fact_store._batch_buffer = None
         
         facts_path = self.base_path / self.FACTS_FILE
         if facts_path.exists():
@@ -245,6 +246,7 @@ class StoragePersistence:
         fact_store._qt_dict = qt_dict
         fact_store._next_txn = 0
         fact_store._default_graph_id = 0
+        fact_store._batch_buffer = None
         
         facts_path = self.base_path / self.FACTS_FILE
         if facts_path.exists():

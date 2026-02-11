@@ -8,12 +8,13 @@ import Security from './components/Security'
 import SQLExplorer from './components/SQLExplorer'
 import AIGrounding from './components/AIGrounding'
 import Starchart from './components/Starchart'
+import { UserMenu, useAuth } from './components/Auth'
 import {
   DatabaseIcon, PlayIcon, PlusIcon, TrashIcon, FolderIcon,
   TableIcon, NetworkIcon, CodeIcon, SunIcon, MoonIcon,
   SearchIcon, SettingsIcon, BookIcon, ZapIcon, GlobeIcon,
   ChevronDownIcon, CloseIcon, RefreshIcon, HomeIcon, ShieldIcon,
-  TerminalIcon, BrainIcon, MapIcon
+  TerminalIcon, BrainIcon, MapIcon, PaletteIcon, DownloadIcon, InfoIcon
 } from './components/Icons'
 import './index.css'
 
@@ -82,12 +83,67 @@ const formatValue = (value) => {
   return value
 }
 
+// Default colors for node types (Neo4j-inspired palette)
+const DEFAULT_TYPE_COLORS = [
+  '#6366f1', // Indigo
+  '#22c55e', // Green
+  '#f59e0b', // Amber
+  '#ec4899', // Pink
+  '#06b6d4', // Cyan
+  '#8b5cf6', // Violet
+  '#ef4444', // Red
+  '#14b8a6', // Teal
+  '#f97316', // Orange
+  '#84cc16', // Lime
+]
+
 // ============================================================================
 // Graph Visualization Component
 // ============================================================================
-function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme }) {
+function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles, selectedNodeId }) {
   const svgRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
+  
+  // Get color for a node based on its types
+  const getNodeColor = useCallback((node) => {
+    if (!node.types || node.types.length === 0) {
+      return theme === 'dark' ? '#313244' : '#e6e9ef' // Default color
+    }
+    
+    // Check if any type has a custom color
+    for (const type of node.types) {
+      if (graphStyles?.nodeColors?.[type]) {
+        return graphStyles.nodeColors[type]
+      }
+    }
+    
+    // Auto-assign color based on first type
+    const firstType = node.types[0]
+    const typeIndex = Object.keys(graphStyles?.nodeTypes || {})
+      .flatMap(nid => graphStyles.nodeTypes[nid])
+      .filter((v, i, a) => a.indexOf(v) === i) // unique types
+      .indexOf(firstType)
+    
+    return DEFAULT_TYPE_COLORS[typeIndex % DEFAULT_TYPE_COLORS.length] || (theme === 'dark' ? '#313244' : '#e6e9ef')
+  }, [theme, graphStyles])
+  
+  // Get label for a node based on style settings
+  const getNodeLabel = useCallback((node) => {
+    if (!node.types || node.types.length === 0) {
+      return node.label || getLocalName(node.id)
+    }
+    
+    // Check if any type has a custom label property
+    for (const type of node.types) {
+      const labelProp = graphStyles?.labelProperties?.[type]
+      if (labelProp && node.data?.[labelProp]) {
+        const val = node.data[labelProp]
+        return val.length > 20 ? val.substring(0, 18) + '...' : val
+      }
+    }
+    
+    return node.label || getLocalName(node.id)
+  }, [graphStyles])
   
   useEffect(() => {
     if (!svgRef.current) return
@@ -126,11 +182,18 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme }) {
     
     const g = svg.append('g')
     
+    // KeyLines-style organic layout:
+    // 1. Run simulation to completion (fast alpha decay)
+    // 2. Fix all nodes in place
+    // 3. Dragging moves node directly without re-simulating
+    
     const simulation = d3.forceSimulation(nodes)
-      .force('link', d3.forceLink(edges).id(d => d.id).distance(150))
-      .force('charge', d3.forceManyBody().strength(-400))
+      .force('link', d3.forceLink(edges).id(d => d.id).distance(180).strength(0.5))
+      .force('charge', d3.forceManyBody().strength(-500).distanceMax(400))
       .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collision', d3.forceCollide().radius(50))
+      .force('collision', d3.forceCollide().radius(60))
+      .alphaDecay(0.05)  // Faster decay = settles quicker
+      .velocityDecay(0.4)  // Higher friction = less floaty
     
     // Arrow marker
     svg.append('defs').append('marker')
@@ -175,45 +238,11 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme }) {
       .attr('text-anchor', 'middle')
       .attr('pointer-events', 'none')
     
-    // Nodes
-    const node = g.append('g')
-      .selectAll('g')
-      .data(nodes)
-      .join('g')
-      .attr('cursor', 'pointer')
-      .call(d3.drag()
-        .on('start', (event, d) => {
-          if (!event.active) simulation.alphaTarget(0.1).restart()
-          d.fx = d.x
-          d.fy = d.y
-        })
-        .on('drag', (event, d) => {
-          d.fx = event.x
-          d.fy = event.y
-        })
-        .on('end', (event, d) => {
-          if (!event.active) simulation.alphaTarget(0)
-        }))
-      .on('click', (event, d) => onNodeClick && onNodeClick(d))
+    // Track if simulation has settled
+    let simulationSettled = false
     
-    node.append('circle')
-      .attr('r', 18)
-      .attr('fill', isDark ? '#313244' : '#e6e9ef')
-      .attr('stroke', isDark ? '#89b4fa' : '#1e66f5')
-      .attr('stroke-width', 2)
-    
-    node.append('text')
-      .attr('dy', 35)
-      .attr('text-anchor', 'middle')
-      .attr('fill', isDark ? '#cdd6f4' : '#4c4f69')
-      .attr('font-size', '12px')
-      .attr('font-weight', '500')
-      .text(d => {
-        const label = d.label || getLocalName(d.id)
-        return label.length > 20 ? label.substring(0, 18) + '...' : label
-      })
-    
-    simulation.on('tick', () => {
+    // Update positions function (used during simulation and after)
+    const updatePositions = () => {
       link
         .attr('x1', d => d.source.x)
         .attr('y1', d => d.source.y)
@@ -225,10 +254,70 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme }) {
         .attr('y', d => (d.source.y + d.target.y) / 2 - 8)
       
       node.attr('transform', d => `translate(${d.x},${d.y})`)
+    }
+    
+    // Nodes with KeyLines-style drag behavior
+    const node = g.append('g')
+      .selectAll('g')
+      .data(nodes)
+      .join('g')
+      .attr('cursor', 'grab')
+      .attr('class', d => d.id === selectedNodeId ? 'node selected' : 'node')
+      .call(d3.drag()
+        .on('start', (event, d) => {
+          d3.select(event.sourceEvent.target.parentNode).attr('cursor', 'grabbing')
+          // Fix position immediately
+          d.fx = d.x
+          d.fy = d.y
+        })
+        .on('drag', (event, d) => {
+          // Direct position update - no simulation restart
+          d.fx = event.x
+          d.fy = event.y
+          d.x = event.x
+          d.y = event.y
+          updatePositions()
+        })
+        .on('end', (event, d) => {
+          d3.select(event.sourceEvent.target.parentNode).attr('cursor', 'grab')
+          // Keep node fixed where it was dropped (KeyLines behavior)
+          d.fx = d.x
+          d.fy = d.y
+        }))
+      .on('click', (event, d) => onNodeClick && onNodeClick(d))
+    
+    node.append('circle')
+      .attr('r', 20)
+      .attr('fill', d => getNodeColor(d))
+      .attr('stroke', d => d.id === selectedNodeId ? '#fff' : (isDark ? '#89b4fa' : '#1e66f5'))
+      .attr('stroke-width', d => d.id === selectedNodeId ? 3 : 2)
+    
+    node.append('text')
+      .attr('dy', 38)
+      .attr('text-anchor', 'middle')
+      .attr('fill', isDark ? '#cdd6f4' : '#4c4f69')
+      .attr('font-size', '12px')
+      .attr('font-weight', '500')
+      .text(d => {
+        const label = getNodeLabel(d)
+        return label.length > 20 ? label.substring(0, 18) + '...' : label
+      })
+    
+    // Simulation tick - only runs during initial layout
+    simulation.on('tick', updatePositions)
+    
+    // When simulation ends, fix all nodes in place
+    simulation.on('end', () => {
+      simulationSettled = true
+      // Fix all nodes where they landed
+      nodes.forEach(d => {
+        d.fx = d.x
+        d.fy = d.y
+      })
     })
     
     return () => simulation.stop()
-  }, [nodes, edges, theme, onNodeClick, onEdgeClick])
+  }, [nodes, edges, theme, onNodeClick, onEdgeClick, getNodeColor, getNodeLabel, selectedNodeId])
   
   return (
     <div className="graph-container">
@@ -280,6 +369,8 @@ function ResultsTable({ results, columns, theme }) {
 function CreateProjectModal({ isOpen, onClose, onCreate, theme }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [reasoningLevel, setReasoningLevel] = useState('none')
+  const [materializeOnLoad, setMaterializeOnLoad] = useState(false)
   const [error, setError] = useState(null)
   const [creating, setCreating] = useState(false)
 
@@ -293,9 +384,11 @@ function CreateProjectModal({ isOpen, onClose, onCreate, theme }) {
     try {
       setCreating(true)
       setError(null)
-      await onCreate(name.trim(), description.trim())
+      await onCreate(name.trim(), description.trim(), reasoningLevel, materializeOnLoad)
       setName('')
       setDescription('')
+      setReasoningLevel('none')
+      setMaterializeOnLoad(false)
       onClose()
     } catch (err) {
       setError(err.message)
@@ -332,6 +425,32 @@ function CreateProjectModal({ isOpen, onClose, onCreate, theme }) {
               rows={3}
             />
           </div>
+          <div className="form-group">
+            <label>Reasoning Level</label>
+            <select 
+              value={reasoningLevel} 
+              onChange={e => setReasoningLevel(e.target.value)}
+              className="select-input"
+            >
+              <option value="none">None - No inference</option>
+              <option value="rdfs">RDFS - Basic class/property inference</option>
+              <option value="rdfs_plus">RDFS+ - RDFS plus basic OWL</option>
+              <option value="owl_rl">OWL 2 RL - Full OWL 2 RL profile</option>
+            </select>
+            <small>Controls RDFS/OWL reasoning (like GraphDB)</small>
+          </div>
+          {reasoningLevel !== 'none' && (
+            <div className="form-group checkbox-group">
+              <label className="checkbox-label">
+                <input 
+                  type="checkbox" 
+                  checked={materializeOnLoad}
+                  onChange={e => setMaterializeOnLoad(e.target.checked)}
+                />
+                <span>Auto-run inference after data loads</span>
+              </label>
+            </div>
+          )}
           {error && <div className="error-message">{error}</div>}
         </div>
         <div className="modal-footer">
@@ -373,7 +492,7 @@ function App() {
   
   // View state
   const [viewMode, setViewMode] = useState('table') // 'table' | 'graph' | 'json'
-  const [sidePanel, setSidePanel] = useState('schema') // 'schema' | 'import' | null
+  const [sidePanel, setSidePanel] = useState('schema') // 'schema' | 'import' | 'details' | 'styling' | null
   const [graphNodes, setGraphNodes] = useState([])
   const [graphEdges, setGraphEdges] = useState([])
   const [selectedNode, setSelectedNode] = useState(null)
@@ -381,9 +500,29 @@ function App() {
   const [nodeProperties, setNodeProperties] = useState(null)
   const [nodeAnnotations, setNodeAnnotations] = useState(null) // RDF-Star annotations
   const [detailsPanel, setDetailsPanel] = useState(false) // Right panel visibility
-  const [expandedSections, setExpandedSections] = useState({ objectProps: true, dataProps: true, provenance: false, annotations: false, metadata: false })
+  const [expandedSections, setExpandedSections] = useState({ objectProps: true, dataProps: true, provenance: false, annotations: false, metadata: false, styling: true })
   const [expandedProps, setExpandedProps] = useState({}) // Track expanded property accordions for competing claims
   const [showQueryHelpers, setShowQueryHelpers] = useState(false) // Query helpers panel
+  
+  // Graph styling state (Neo4j-like)
+  const [graphStyles, setGraphStyles] = useState(() => {
+    const saved = localStorage.getItem('rdf-starbase-graph-styles')
+    return saved ? JSON.parse(saved) : {
+      nodeColors: {},      // { typeUri: '#hexcolor' }
+      labelProperties: {}, // { typeUri: propertyUri }
+      nodeTypes: {},       // { nodeId: [typeUris] } - populated from query results
+      nodeData: {},        // { nodeId: { propUri: value } } - data properties for labels
+    }
+  })
+  const [availableTypes, setAvailableTypes] = useState([]) // Types found in current graph
+  
+  // Persist graph styles
+  useEffect(() => {
+    localStorage.setItem('rdf-starbase-graph-styles', JSON.stringify({
+      nodeColors: graphStyles.nodeColors,
+      labelProperties: graphStyles.labelProperties,
+    }))
+  }, [graphStyles.nodeColors, graphStyles.labelProperties])
   
   // API state
   const [apiStatus, setApiStatus] = useState('checking')
@@ -422,10 +561,16 @@ function App() {
   }, [])
 
   // Create repository
-  const createRepository = useCallback(async (name, description) => {
+  const createRepository = useCallback(async (name, description, reasoningLevel = 'none', materializeOnLoad = false) => {
     await fetchJson('/repositories', {
       method: 'POST',
-      body: JSON.stringify({ name, description, tags: [] }),
+      body: JSON.stringify({ 
+        name, 
+        description, 
+        tags: [],
+        reasoning_level: reasoningLevel,
+        materialize_on_load: materializeOnLoad,
+      }),
     })
     await loadRepositories()
     setCurrentRepo(name)
@@ -449,10 +594,13 @@ function App() {
     }
   }, [currentRepo, loadRepositories])
 
-  // Build graph from results
+  // Build graph from results - extracts types and data properties for styling
   const buildGraph = useCallback((results, columns) => {
     const nodeSet = new Set()
     const edgeList = []
+    const nodeTypes = {} // { nodeId: Set<typeUri> }
+    const nodeData = {}  // { nodeId: { propUri: value } }
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
     const hasTriples = columns.includes('s') && columns.includes('p') && columns.includes('o')
     
     if (hasTriples) {
@@ -463,6 +611,19 @@ function App() {
         if (typeof s === 'string' && s.startsWith('<<')) continue
         if (typeof o === 'string' && o.startsWith('<<')) continue
         nodeSet.add(s)
+        
+        // Track rdf:type for styling
+        if (p === RDF_TYPE || p.endsWith('#type') || p.endsWith('/type')) {
+          if (!nodeTypes[s]) nodeTypes[s] = new Set()
+          nodeTypes[s].add(o)
+        }
+        
+        // Track data properties (non-URI objects) for label options
+        if (typeof o === 'string' && !o.startsWith('http') && !o.startsWith('urn:')) {
+          if (!nodeData[s]) nodeData[s] = {}
+          nodeData[s][p] = o
+        }
+        
         if (typeof o === 'string' && (o.startsWith('http') || o.startsWith('urn:') || o.startsWith('mailto:'))) {
           nodeSet.add(o)
           edgeList.push({ source: s, target: o, predicate: p, label: getLocalName(p) })
@@ -479,8 +640,29 @@ function App() {
       }
     }
     
+    // Convert Sets to Arrays for state
+    const nodeTypesArray = {}
+    const allTypes = new Set()
+    for (const [nodeId, types] of Object.entries(nodeTypes)) {
+      nodeTypesArray[nodeId] = [...types]
+      types.forEach(t => allTypes.add(t))
+    }
+    
+    // Update available types for styling panel
+    setAvailableTypes([...allTypes])
+    setGraphStyles(prev => ({
+      ...prev,
+      nodeTypes: nodeTypesArray,
+      nodeData: nodeData,
+    }))
+    
     return {
-      nodes: [...nodeSet].map(id => ({ id, label: getLocalName(id) })),
+      nodes: [...nodeSet].map(id => ({ 
+        id, 
+        label: getLocalName(id),
+        types: nodeTypesArray[id] || [],
+        data: nodeData[id] || {},
+      })),
       edges: edgeList
     }
   }, [])
@@ -508,9 +690,7 @@ function App() {
         const { nodes, edges } = buildGraph(result.results, result.columns)
         setGraphNodes(nodes)
         setGraphEdges(edges)
-        if (edges.length > 0 && viewMode !== 'json') {
-          setViewMode('graph')
-        }
+        // Don't auto-switch view - respect user's current view choice
       } else if (result.type === 'construct' && result.triples) {
         const nodeSet = new Set()
         const edgeList = []
@@ -537,7 +717,7 @@ function App() {
     } finally {
       setExecuting(false)
     }
-  }, [currentRepo, sparqlQuery, buildGraph, loadStats, loadRepositories, viewMode])
+  }, [currentRepo, sparqlQuery, buildGraph, loadStats, loadRepositories])
 
   // Initialize
   useEffect(() => {
@@ -573,6 +753,7 @@ function App() {
     setSelectedNode(node)
     setSelectedEdge(null)
     setDetailsPanel(true)
+    setSidePanel('details') // Auto-switch to details tab
     setExpandedProps({})
     if (!currentRepo) return
     
@@ -1121,6 +1302,7 @@ function App() {
           >
             {theme === 'dark' ? <SunIcon size={18} /> : <MoonIcon size={18} />}
           </button>
+          <UserMenu />
         </div>
       </header>
 
@@ -1149,7 +1331,7 @@ function App() {
         ) : activeTab === 'ai' ? (
           <AIGrounding theme={theme} currentRepo={currentRepo} />
         ) : activeTab === 'mapper' ? (
-          <Starchart theme={theme} />
+          <Starchart theme={theme} currentRepo={currentRepo} />
         ) : (
         <>
         {/* Query Panel */}
@@ -1270,6 +1452,24 @@ function App() {
               >
                 I/O
               </button>
+              {viewMode === 'graph' && (
+                <>
+                  <button 
+                    className={`icon-btn ${sidePanel === 'details' ? 'active' : ''}`}
+                    onClick={() => setSidePanel(s => s === 'details' ? null : 'details')}
+                    title="Node Details"
+                  >
+                    <InfoIcon size={18} />
+                  </button>
+                  <button 
+                    className={`icon-btn ${sidePanel === 'styling' ? 'active' : ''}`}
+                    onClick={() => setSidePanel(s => s === 'styling' ? null : 'styling')}
+                    title="Node Styling"
+                  >
+                    <PaletteIcon size={18} />
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -1311,232 +1511,10 @@ function App() {
                     edges={graphEdges} 
                     onNodeClick={handleNodeClick}
                     onEdgeClick={handleEdgeClick}
-                    theme={theme} 
+                    theme={theme}
+                    graphStyles={graphStyles}
+                    selectedNodeId={selectedNode?.id}
                   />
-                  {detailsPanel && (selectedNode || selectedEdge) && (
-                    <div className={`graph-details-panel ${theme}`}>
-                      <div className="graph-details-header">
-                        <h4>{selectedNode ? 'Node Details' : 'Edge Details'}</h4>
-                        <button className="close-btn" onClick={closeDetailsPanel}>×</button>
-                      </div>
-                      <div className="graph-details-content">
-                        {selectedNode && (
-                          <>
-                            <div className="detail-uri">{getLocalName(selectedNode.id)}</div>
-                            <div className="detail-full-uri">{selectedNode.id}</div>
-                            
-                            {/* Object Properties Accordion */}
-                            {(() => {
-                              const objectProps = nodeProperties?.filter(p => p.isObjectProperty) || []
-                              return objectProps.length > 0 && (
-                                <div className="accordion-section">
-                                  <button 
-                                    className={`accordion-header ${expandedSections.objectProps ? 'expanded' : ''}`}
-                                    onClick={() => toggleSection('objectProps')}
-                                  >
-                                    <span>Object Properties</span>
-                                    <span className="accordion-count">{objectProps.length}</span>
-                                    <span className="accordion-icon">{expandedSections.objectProps ? '−' : '+'}</span>
-                                  </button>
-                                  {expandedSections.objectProps && (
-                                    <div className="accordion-content">
-                                      <div className="properties-list">
-                                        {objectProps.map((prop, i) => (
-                                          <div key={i} className={`property-item ${prop.hasCompetingClaims || prop.hasProvenance ? 'has-details' : ''}`}>
-                                            <div 
-                                              className="property-header"
-                                              onClick={() => (prop.hasCompetingClaims || prop.hasProvenance) && togglePropExpand(prop.predicate)}
-                                            >
-                                              <span className="prop-name" title={prop.predicate}>{getLocalName(prop.predicate)}</span>
-                                              <span className="prop-indicators">
-                                                {prop.hasProvenance && <span className="indicator prov-indicator" title="Has provenance">P</span>}
-                                                {prop.hasCompetingClaims && <span className="indicator claims-indicator" title="Competing claims">C</span>}
-                                              </span>
-                                              {(prop.hasCompetingClaims || prop.hasProvenance) && (
-                                                <span className="prop-expand">{expandedProps[prop.predicate] ? '−' : '+'}</span>
-                                              )}
-                                            </div>
-                                            <div className="property-values">
-                                              {prop.values.map((val, j) => (
-                                                <div key={j} className="prop-value-row">
-                                                  <span className="prop-value" title={val.value}>
-                                                    {getLocalName(val.value)}
-                                                  </span>
-                                                  {isURI(val.value) && !isNodeInGraph(val.value) && (
-                                                    <button 
-                                                      className="expand-btn"
-                                                      onClick={(e) => { e.stopPropagation(); expandNode(val.value); }}
-                                                      title="Add to graph"
-                                                    >+</button>
-                                                  )}
-                                                  {isURI(val.value) && isNodeInGraph(val.value) && (
-                                                    <span className="in-graph-indicator" title="In graph">●</span>
-                                                  )}
-                                                </div>
-                                              ))}
-                                            </div>
-                                            {expandedProps[prop.predicate] && (
-                                              <div className="property-details">
-                                                {prop.values.map((val, j) => (
-                                                  val.sources.length > 0 && (
-                                                    <div key={j} className="value-provenance">
-                                                      <div className="val-header">{formatValue(val.value)}</div>
-                                                      {val.sources.map((src, k) => (
-                                                        <div key={k} className="source-info">
-                                                          {src.source && <div className="src-row"><span className="src-label">Source:</span> <span className="src-val">{getLocalName(src.source)}</span></div>}
-                                                          {src.confidence && <div className="src-row"><span className="src-label">Confidence:</span> <span className="src-val">{formatValue(src.confidence)}</span></div>}
-                                                          {src.timestamp && <div className="src-row"><span className="src-label">Time:</span> <span className="src-val">{new Date(src.timestamp).toLocaleString()}</span></div>}
-                                                          {src.metadata?.map((m, l) => (
-                                                            <div key={l} className="src-row"><span className="src-label">{getLocalName(m.predicate)}:</span> <span className="src-val">{formatValue(m.value)}</span></div>
-                                                          ))}
-                                                        </div>
-                                                      ))}
-                                                    </div>
-                                                  )
-                                                ))}
-                                              </div>
-                                            )}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              )
-                            })()}
-
-                            {/* Data Properties Accordion */}
-                            {(() => {
-                              const dataProps = nodeProperties?.filter(p => !p.isObjectProperty) || []
-                              return dataProps.length > 0 && (
-                                <div className="accordion-section">
-                                  <button 
-                                    className={`accordion-header ${expandedSections.dataProps ? 'expanded' : ''}`}
-                                    onClick={() => toggleSection('dataProps')}
-                                  >
-                                    <span>Data Properties</span>
-                                    <span className="accordion-count">{dataProps.length}</span>
-                                    <span className="accordion-icon">{expandedSections.dataProps ? '−' : '+'}</span>
-                                  </button>
-                                  {expandedSections.dataProps && (
-                                    <div className="accordion-content">
-                                      <div className="properties-list">
-                                        {dataProps.map((prop, i) => (
-                                          <div key={i} className={`property-item ${prop.hasCompetingClaims || prop.hasProvenance ? 'has-details' : ''}`}>
-                                            <div 
-                                              className="property-header"
-                                              onClick={() => (prop.hasCompetingClaims || prop.hasProvenance) && togglePropExpand(prop.predicate)}
-                                            >
-                                              <span className="prop-name" title={prop.predicate}>{getLocalName(prop.predicate)}</span>
-                                              <span className="prop-indicators">
-                                                {prop.hasProvenance && <span className="indicator prov-indicator" title="Has provenance">P</span>}
-                                                {prop.hasCompetingClaims && <span className="indicator claims-indicator" title="Competing claims">C</span>}
-                                              </span>
-                                              {(prop.hasCompetingClaims || prop.hasProvenance) && (
-                                                <span className="prop-expand">{expandedProps[prop.predicate] ? '−' : '+'}</span>
-                                              )}
-                                            </div>
-                                            <div className="property-values">
-                                              {prop.values.map((val, j) => (
-                                                <div key={j} className="prop-value-row">
-                                                  <span className="prop-value literal-value" title={val.value}>
-                                                    {formatValue(val.value)}
-                                                  </span>
-                                                </div>
-                                              ))}
-                                            </div>
-                                            {expandedProps[prop.predicate] && (
-                                              <div className="property-details">
-                                                {prop.values.map((val, j) => (
-                                                  val.sources.length > 0 && (
-                                                    <div key={j} className="value-provenance">
-                                                      <div className="val-header">"{formatValue(val.value)}"</div>
-                                                      {val.sources.map((src, k) => (
-                                                        <div key={k} className="source-info">
-                                                          {src.source && <div className="src-row"><span className="src-label">Source:</span> <span className="src-val">{getLocalName(src.source)}</span></div>}
-                                                          {src.confidence && <div className="src-row"><span className="src-label">Confidence:</span> <span className="src-val">{formatValue(src.confidence)}</span></div>}
-                                                          {src.timestamp && <div className="src-row"><span className="src-label">Time:</span> <span className="src-val">{new Date(src.timestamp).toLocaleString()}</span></div>}
-                                                          {src.metadata?.map((m, l) => (
-                                                            <div key={l} className="src-row"><span className="src-label">{getLocalName(m.predicate)}:</span> <span className="src-val">{formatValue(m.value)}</span></div>
-                                                          ))}
-                                                        </div>
-                                                      ))}
-                                                    </div>
-                                                  )
-                                                ))}
-                                              </div>
-                                            )}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              )
-                            })()}
-
-                            {/* RDF-Star Annotations Accordion */}
-                            <div className="accordion-section">
-                              <button 
-                                className={`accordion-header ${expandedSections.annotations ? 'expanded' : ''}`}
-                                onClick={() => toggleSection('annotations')}
-                              >
-                                <span>RDF-Star Annotations</span>
-                                <span className="accordion-count">{nodeAnnotations?.length || 0}</span>
-                                <span className="accordion-icon">{expandedSections.annotations ? '−' : '+'}</span>
-                              </button>
-                              {expandedSections.annotations && (
-                                <div className="accordion-content">
-                                  {nodeAnnotations && nodeAnnotations.length > 0 ? (
-                                    <div className="annotations-list">
-                                      {nodeAnnotations.map((ann, i) => (
-                                        <div key={i} className="annotation-item">
-                                          <div className="annotation-triple">
-                                            &lt;&lt; {getLocalName(ann.innerS)} {getLocalName(ann.innerP)} {getLocalName(ann.innerO)} &gt;&gt;
-                                          </div>
-                                          <div className="annotation-meta">
-                                            <span className="ann-pred">{getLocalName(ann.annPred)}</span>
-                                            <span className="ann-val">{formatValue(ann.annVal)}</span>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  ) : (
-                                    <p className="no-data">No RDF-Star annotations</p>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-
-                            {/* No properties message */}
-                            {(!nodeProperties || nodeProperties.length === 0) && (
-                              <p className="no-data">No properties found</p>
-                            )}
-                          </>
-                        )}
-                        {selectedEdge && (
-                          <>
-                            <div className="edge-detail">
-                              <span className="edge-label">Predicate</span>
-                              <span className="edge-value" title={selectedEdge.predicate}>{getLocalName(selectedEdge.predicate)}</span>
-                            </div>
-                            <div className="edge-detail">
-                              <span className="edge-label">Full URI</span>
-                              <span className="edge-value-small">{selectedEdge.predicate}</span>
-                            </div>
-                            <div className="edge-detail">
-                              <span className="edge-label">Source Node</span>
-                              <span className="edge-value">{getLocalName(selectedEdge.source?.id || selectedEdge.source)}</span>
-                            </div>
-                            <div className="edge-detail">
-                              <span className="edge-label">Target Node</span>
-                              <span className="edge-value">{getLocalName(selectedEdge.target?.id || selectedEdge.target)}</span>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -1551,22 +1529,371 @@ function App() {
               )}
             </div>
 
+            {/* Side Panel with Tabs */}
             {sidePanel && (
               <div className="side-panel">
-                {sidePanel === 'schema' && (
-                  <SchemaBrowser 
-                    repositoryName={currentRepo} 
-                    onInsert={handleSchemaInsert}
-                    theme={theme}
-                  />
-                )}
-                {sidePanel === 'import' && (
-                  <ImportExport 
-                    repositoryName={currentRepo}
-                    onDataChanged={() => { loadStats(currentRepo); loadRepositories() }}
-                    theme={theme}
-                  />
-                )}
+                <div className="side-panel-tabs">
+                  <button 
+                    className={`side-tab ${sidePanel === 'schema' ? 'active' : ''}`}
+                    onClick={() => setSidePanel('schema')}
+                    title="Schema Browser"
+                  >
+                    <BookIcon size={14} /> Schema
+                  </button>
+                  <button 
+                    className={`side-tab ${sidePanel === 'import' ? 'active' : ''}`}
+                    onClick={() => setSidePanel('import')}
+                    title="Import / Export"
+                  >
+                    <DownloadIcon size={14} /> Import
+                  </button>
+                  {viewMode === 'graph' && (
+                    <>
+                      <button 
+                        className={`side-tab ${sidePanel === 'details' ? 'active' : ''}`}
+                        onClick={() => setSidePanel('details')}
+                        title="Node Details"
+                      >
+                        <InfoIcon size={14} /> Details
+                      </button>
+                      <button 
+                        className={`side-tab ${sidePanel === 'styling' ? 'active' : ''}`}
+                        onClick={() => setSidePanel('styling')}
+                        title="Node Styling"
+                      >
+                        <PaletteIcon size={14} /> Style
+                      </button>
+                    </>
+                  )}
+                  <button 
+                    className="side-tab close-tab"
+                    onClick={() => setSidePanel(null)}
+                    title="Close Panel"
+                  >
+                    ×
+                  </button>
+                </div>
+                
+                <div className="side-panel-content">
+                  {/* Schema Browser Tab */}
+                  {sidePanel === 'schema' && (
+                    <SchemaBrowser 
+                      repositoryName={currentRepo} 
+                      onInsert={handleSchemaInsert}
+                      theme={theme}
+                    />
+                  )}
+                  
+                  {/* Import/Export Tab */}
+                  {sidePanel === 'import' && (
+                    <ImportExport 
+                      repositoryName={currentRepo}
+                      onDataChanged={() => { loadStats(currentRepo); loadRepositories() }}
+                      theme={theme}
+                    />
+                  )}
+                  
+                  {/* Node Details Tab (Graph view only) */}
+                  {sidePanel === 'details' && viewMode === 'graph' && (
+                    <div className="graph-details-tab">
+                      {selectedNode ? (
+                        <>
+                          <div className="detail-uri">{getLocalName(selectedNode.id)}</div>
+                          <div className="detail-full-uri">{selectedNode.id}</div>
+                          
+                          {selectedNode.types?.length > 0 && (
+                            <div className="node-types">
+                              {selectedNode.types.map((t, i) => (
+                                <span 
+                                  key={i} 
+                                  className="type-badge"
+                                  style={{ backgroundColor: graphStyles.nodeColors[t] || DEFAULT_TYPE_COLORS[i % DEFAULT_TYPE_COLORS.length] }}
+                                >
+                                  {getLocalName(t)}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          
+                          {/* Object Properties Accordion */}
+                          {(() => {
+                            const objectProps = nodeProperties?.filter(p => p.isObjectProperty) || []
+                            return objectProps.length > 0 && (
+                              <div className="accordion-section">
+                                <button 
+                                  className={`accordion-header ${expandedSections.objectProps ? 'expanded' : ''}`}
+                                  onClick={() => toggleSection('objectProps')}
+                                >
+                                  <span>Object Properties</span>
+                                  <span className="accordion-count">{objectProps.length}</span>
+                                  <span className="accordion-icon">{expandedSections.objectProps ? '−' : '+'}</span>
+                                </button>
+                                {expandedSections.objectProps && (
+                                  <div className="accordion-content">
+                                    <div className="properties-list">
+                                      {objectProps.map((prop, i) => (
+                                        <div key={i} className={`property-item ${prop.hasCompetingClaims || prop.hasProvenance ? 'has-details' : ''}`}>
+                                          <div 
+                                            className="property-header"
+                                            onClick={() => (prop.hasCompetingClaims || prop.hasProvenance) && togglePropExpand(prop.predicate)}
+                                          >
+                                            <span className="prop-name" title={prop.predicate}>{getLocalName(prop.predicate)}</span>
+                                            <span className="prop-indicators">
+                                              {prop.hasProvenance && <span className="indicator prov-indicator" title="Has provenance">P</span>}
+                                              {prop.hasCompetingClaims && <span className="indicator claims-indicator" title="Competing claims">C</span>}
+                                            </span>
+                                            {(prop.hasCompetingClaims || prop.hasProvenance) && (
+                                              <span className="prop-expand">{expandedProps[prop.predicate] ? '−' : '+'}</span>
+                                            )}
+                                          </div>
+                                          <div className="property-values">
+                                            {prop.values.map((val, j) => (
+                                              <div key={j} className="prop-value-row">
+                                                <span className="prop-value" title={val.value}>
+                                                  {getLocalName(val.value)}
+                                                </span>
+                                                {isURI(val.value) && !isNodeInGraph(val.value) && (
+                                                  <button 
+                                                    className="expand-btn"
+                                                    onClick={(e) => { e.stopPropagation(); expandNode(val.value); }}
+                                                    title="Add to graph"
+                                                  >+</button>
+                                                )}
+                                                {isURI(val.value) && isNodeInGraph(val.value) && (
+                                                  <span className="in-graph-indicator" title="In graph">●</span>
+                                                )}
+                                              </div>
+                                            ))}
+                                          </div>
+                                          {expandedProps[prop.predicate] && (
+                                            <div className="property-details">
+                                              {prop.values.map((val, j) => (
+                                                val.sources.length > 0 && (
+                                                  <div key={j} className="value-provenance">
+                                                    <div className="val-header">{formatValue(val.value)}</div>
+                                                    {val.sources.map((src, k) => (
+                                                      <div key={k} className="source-info">
+                                                        {src.source && <div className="src-row"><span className="src-label">Source:</span> <span className="src-val">{getLocalName(src.source)}</span></div>}
+                                                        {src.confidence && <div className="src-row"><span className="src-label">Confidence:</span> <span className="src-val">{formatValue(src.confidence)}</span></div>}
+                                                        {src.timestamp && <div className="src-row"><span className="src-label">Time:</span> <span className="src-val">{new Date(src.timestamp).toLocaleString()}</span></div>}
+                                                        {src.metadata?.map((m, l) => (
+                                                          <div key={l} className="src-row"><span className="src-label">{getLocalName(m.predicate)}:</span> <span className="src-val">{formatValue(m.value)}</span></div>
+                                                        ))}
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                )
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })()}
+
+                          {/* Data Properties Accordion */}
+                          {(() => {
+                            const dataProps = nodeProperties?.filter(p => !p.isObjectProperty) || []
+                            return dataProps.length > 0 && (
+                              <div className="accordion-section">
+                                <button 
+                                  className={`accordion-header ${expandedSections.dataProps ? 'expanded' : ''}`}
+                                  onClick={() => toggleSection('dataProps')}
+                                >
+                                  <span>Data Properties</span>
+                                  <span className="accordion-count">{dataProps.length}</span>
+                                  <span className="accordion-icon">{expandedSections.dataProps ? '−' : '+'}</span>
+                                </button>
+                                {expandedSections.dataProps && (
+                                  <div className="accordion-content">
+                                    <div className="properties-list">
+                                      {dataProps.map((prop, i) => (
+                                        <div key={i} className={`property-item ${prop.hasCompetingClaims || prop.hasProvenance ? 'has-details' : ''}`}>
+                                          <div 
+                                            className="property-header"
+                                            onClick={() => (prop.hasCompetingClaims || prop.hasProvenance) && togglePropExpand(prop.predicate)}
+                                          >
+                                            <span className="prop-name" title={prop.predicate}>{getLocalName(prop.predicate)}</span>
+                                            <span className="prop-indicators">
+                                              {prop.hasProvenance && <span className="indicator prov-indicator" title="Has provenance">P</span>}
+                                              {prop.hasCompetingClaims && <span className="indicator claims-indicator" title="Competing claims">C</span>}
+                                            </span>
+                                            {(prop.hasCompetingClaims || prop.hasProvenance) && (
+                                              <span className="prop-expand">{expandedProps[prop.predicate] ? '−' : '+'}</span>
+                                            )}
+                                          </div>
+                                          <div className="property-values">
+                                            {prop.values.map((val, j) => (
+                                              <div key={j} className="prop-value-row">
+                                                <span className="prop-value literal-value" title={val.value}>
+                                                  {formatValue(val.value)}
+                                                </span>
+                                              </div>
+                                            ))}
+                                          </div>
+                                          {expandedProps[prop.predicate] && (
+                                            <div className="property-details">
+                                              {prop.values.map((val, j) => (
+                                                val.sources.length > 0 && (
+                                                  <div key={j} className="value-provenance">
+                                                    <div className="val-header">"{formatValue(val.value)}"</div>
+                                                    {val.sources.map((src, k) => (
+                                                      <div key={k} className="source-info">
+                                                        {src.source && <div className="src-row"><span className="src-label">Source:</span> <span className="src-val">{getLocalName(src.source)}</span></div>}
+                                                        {src.confidence && <div className="src-row"><span className="src-label">Confidence:</span> <span className="src-val">{formatValue(src.confidence)}</span></div>}
+                                                        {src.timestamp && <div className="src-row"><span className="src-label">Time:</span> <span className="src-val">{new Date(src.timestamp).toLocaleString()}</span></div>}
+                                                        {src.metadata?.map((m, l) => (
+                                                          <div key={l} className="src-row"><span className="src-label">{getLocalName(m.predicate)}:</span> <span className="src-val">{formatValue(m.value)}</span></div>
+                                                        ))}
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                )
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })()}
+
+                          {/* RDF-Star Annotations Accordion */}
+                          <div className="accordion-section">
+                            <button 
+                              className={`accordion-header ${expandedSections.annotations ? 'expanded' : ''}`}
+                              onClick={() => toggleSection('annotations')}
+                            >
+                              <span>RDF-Star Annotations</span>
+                              <span className="accordion-count">{nodeAnnotations?.length || 0}</span>
+                              <span className="accordion-icon">{expandedSections.annotations ? '−' : '+'}</span>
+                            </button>
+                            {expandedSections.annotations && (
+                              <div className="accordion-content">
+                                {nodeAnnotations && nodeAnnotations.length > 0 ? (
+                                  <div className="annotations-list">
+                                    {nodeAnnotations.map((ann, i) => (
+                                      <div key={i} className="annotation-item">
+                                        <div className="annotation-triple">
+                                          &lt;&lt; {getLocalName(ann.innerS)} {getLocalName(ann.innerP)} {getLocalName(ann.innerO)} &gt;&gt;
+                                        </div>
+                                        <div className="annotation-meta">
+                                          <span className="ann-pred">{getLocalName(ann.annPred)}</span>
+                                          <span className="ann-val">{formatValue(ann.annVal)}</span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="no-data">No RDF-Star annotations</p>
+                                )}
+                              </div>
+                            )}
+                          </div>
+
+                          {(!nodeProperties || nodeProperties.length === 0) && (
+                            <p className="no-data">No properties found</p>
+                          )}
+                        </>
+                      ) : selectedEdge ? (
+                        <>
+                          <div className="detail-uri">Edge: {getLocalName(selectedEdge.predicate)}</div>
+                          <div className="detail-full-uri">{selectedEdge.predicate}</div>
+                          <div className="edge-detail">
+                            <span className="edge-label">Source</span>
+                            <span className="edge-value">{getLocalName(selectedEdge.source?.id || selectedEdge.source)}</span>
+                          </div>
+                          <div className="edge-detail">
+                            <span className="edge-label">Target</span>
+                            <span className="edge-value">{getLocalName(selectedEdge.target?.id || selectedEdge.target)}</span>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="empty-tab-content">
+                          <p>Click a node or edge to see details</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {/* Node Styling Tab (Graph view only) */}
+                  {sidePanel === 'styling' && viewMode === 'graph' && (
+                    <div className="graph-styling-tab">
+                      <div className="styling-section">
+                        <h4>Node Types</h4>
+                        {availableTypes.length > 0 ? (
+                          <div className="type-styles-list">
+                            {availableTypes.map((typeUri, i) => {
+                              // Get unique data properties from nodes of this type
+                              const availableProps = [...new Set(
+                                Object.entries(graphStyles.nodeData || {})
+                                  .filter(([nodeId]) => graphStyles.nodeTypes[nodeId]?.includes(typeUri))
+                                  .flatMap(([_, data]) => Object.keys(data))
+                              )]
+                              
+                              return (
+                                <div key={typeUri} className="type-style-row">
+                                  <div className="type-style-header">
+                                    <input 
+                                      type="color" 
+                                      className="type-color-input"
+                                      value={graphStyles.nodeColors[typeUri] || DEFAULT_TYPE_COLORS[i % DEFAULT_TYPE_COLORS.length]}
+                                      onChange={(e) => setGraphStyles(prev => ({
+                                        ...prev,
+                                        nodeColors: { ...prev.nodeColors, [typeUri]: e.target.value }
+                                      }))}
+                                      title="Change color"
+                                    />
+                                    <span className="type-name" title={typeUri}>{getLocalName(typeUri)}</span>
+                                  </div>
+                                  <div className="type-label-select">
+                                    <span className="label-text">Label:</span>
+                                    <select
+                                      value={graphStyles.labelProperties[typeUri] || ''}
+                                      onChange={(e) => setGraphStyles(prev => ({
+                                        ...prev,
+                                        labelProperties: { ...prev.labelProperties, [typeUri]: e.target.value }
+                                      }))}
+                                    >
+                                      <option value="">URI (default)</option>
+                                      {availableProps.map(prop => (
+                                        <option key={prop} value={prop}>{getLocalName(prop)}</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <p className="no-data">
+                            No types found. Run a query that includes rdf:type triples to enable styling.
+                          </p>
+                        )}
+                      </div>
+                      
+                      <div className="styling-actions">
+                        <button 
+                          className="btn secondary small"
+                          onClick={() => setGraphStyles(prev => ({
+                            ...prev,
+                            nodeColors: {},
+                            labelProperties: {},
+                          }))}
+                        >
+                          Reset All Styles
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>

@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { 
   DatabaseIcon, ZapIcon, NetworkIcon, LayersIcon,
   StarIcon, CheckCircleIcon, BoxIcon, GitBranchIcon, 
-  UploadIcon, PlayIcon, PlusIcon, RefreshIcon
+  UploadIcon, PlayIcon, PlusIcon, RefreshIcon,
+  GlobeIcon, CodeIcon, CopyIcon, TerminalIcon, LinkIcon
 } from './Icons'
 
 // API helper
@@ -37,6 +38,13 @@ function RepositoryCard({ repo, isSelected, onSelect }) {
     }
   }, [repo.name])
 
+  const reasoningLabel = {
+    'none': null,
+    'rdfs': 'RDFS',
+    'rdfs_plus': 'RDFS+',
+    'owl_rl': 'OWL 2 RL'
+  }[repo.reasoning_level] || null
+
   return (
     <div 
       className={`repo-card ${isSelected ? 'selected' : ''}`}
@@ -45,6 +53,11 @@ function RepositoryCard({ repo, isSelected, onSelect }) {
       <div className="repo-header">
         <DatabaseIcon size={20} />
         <span className="repo-name">{repo.name}</span>
+        {reasoningLabel && (
+          <span className="reasoning-badge" title={`Reasoning: ${reasoningLabel}`}>
+            <ZapIcon size={12} /> {reasoningLabel}
+          </span>
+        )}
         {isSelected && <span className="selected-badge">Active</span>}
       </div>
       <div className="repo-stats">
@@ -94,6 +107,145 @@ function WorkflowStep({ number, title, description, action, actionLabel, icon: I
           {actionLabel}
         </button>
       )}
+    </div>
+  )
+}
+
+// ============================================================================
+// Endpoint Info Component - Shows API connection details
+// ============================================================================
+function EndpointInfo() {
+  const [copied, setCopied] = useState(null)
+  
+  // Detect the base URL dynamically
+  const baseUrl = typeof window !== 'undefined' 
+    ? `${window.location.protocol}//${window.location.host}`
+    : 'http://localhost:8000'
+  
+  const endpoints = [
+    {
+      name: 'SPARQL Endpoint',
+      url: `${baseUrl}/api/sparql`,
+      method: 'POST',
+      description: 'Execute SPARQL-Star queries (SELECT, ASK, INSERT DATA, DELETE DATA)'
+    },
+    {
+      name: 'SPARQL Update',
+      url: `${baseUrl}/api/sparql/update`,
+      method: 'POST',
+      description: 'Execute SPARQL UPDATE operations'
+    },
+    {
+      name: 'Repository SPARQL',
+      url: `${baseUrl}/api/repositories/{name}/sparql`,
+      method: 'POST',
+      description: 'Execute SPARQL on a specific repository'
+    },
+    {
+      name: 'Repositories',
+      url: `${baseUrl}/api/repositories`,
+      method: 'GET/POST',
+      description: 'List or create repositories'
+    }
+  ]
+  
+  const copyToClipboard = (text, id) => {
+    navigator.clipboard.writeText(text)
+    setCopied(id)
+    setTimeout(() => setCopied(null), 2000)
+  }
+  
+  const curlExample = `curl -X POST "${baseUrl}/api/sparql" \\
+  -H "Content-Type: application/json" \\
+  -d '{"query": "SELECT * WHERE { ?s ?p ?o } LIMIT 10"}'`
+  
+  const pythonExample = `import requests
+
+response = requests.post(
+    "${baseUrl}/api/sparql",
+    json={"query": "SELECT * WHERE { ?s ?p ?o } LIMIT 10"}
+)
+print(response.json())`
+
+  const rdf4jConfig = `# RDF4J Workbench Remote Repository
+Server URL: ${baseUrl}/api
+Repository: {your-repo-name}
+SPARQL endpoint: ${baseUrl}/api/repositories/{repo}/sparql
+Query method: POST`
+
+  return (
+    <div className="endpoint-info">
+      <div className="endpoint-section">
+        <h4><GlobeIcon size={16} /> API Endpoints</h4>
+        <div className="endpoint-list">
+          {endpoints.map((ep, i) => (
+            <div key={i} className="endpoint-item">
+              <div className="endpoint-header">
+                <span className="endpoint-name">{ep.name}</span>
+                <span className="endpoint-method">{ep.method}</span>
+              </div>
+              <div className="endpoint-url">
+                <code>{ep.url}</code>
+                <button 
+                  className="copy-btn"
+                  onClick={() => copyToClipboard(ep.url, `ep-${i}`)}
+                  title="Copy URL"
+                >
+                  {copied === `ep-${i}` ? <CheckCircleIcon size={14} /> : <CopyIcon size={14} />}
+                </button>
+              </div>
+              <p className="endpoint-desc">{ep.description}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+      
+      <div className="endpoint-section">
+        <h4><TerminalIcon size={16} /> Quick Examples</h4>
+        <div className="code-examples">
+          <div className="code-example">
+            <div className="code-header">
+              <span>cURL</span>
+              <button 
+                className="copy-btn"
+                onClick={() => copyToClipboard(curlExample, 'curl')}
+              >
+                {copied === 'curl' ? <CheckCircleIcon size={14} /> : <CopyIcon size={14} />}
+              </button>
+            </div>
+            <pre><code>{curlExample}</code></pre>
+          </div>
+          <div className="code-example">
+            <div className="code-header">
+              <span>Python</span>
+              <button 
+                className="copy-btn"
+                onClick={() => copyToClipboard(pythonExample, 'python')}
+              >
+                {copied === 'python' ? <CheckCircleIcon size={14} /> : <CopyIcon size={14} />}
+              </button>
+            </div>
+            <pre><code>{pythonExample}</code></pre>
+          </div>
+        </div>
+      </div>
+      
+      <div className="endpoint-section">
+        <h4><LinkIcon size={16} /> Tool Integration</h4>
+        <div className="tool-info">
+          <p><strong>RDF4J Workbench / GraphDB:</strong></p>
+          <ul>
+            <li>Add as Remote SPARQL Repository</li>
+            <li>SPARQL endpoint: <code>{baseUrl}/api/repositories/&#123;repo&#125;/sparql</code></li>
+            <li>Method: POST with JSON body</li>
+          </ul>
+          <p><strong>OpenAPI Docs:</strong></p>
+          <ul>
+            <li><a href={`${baseUrl}/docs`} target="_blank" rel="noopener noreferrer">Interactive API Documentation</a></li>
+            <li><a href={`${baseUrl}/redoc`} target="_blank" rel="noopener noreferrer">ReDoc API Reference</a></li>
+          </ul>
+        </div>
+      </div>
     </div>
   )
 }
@@ -502,6 +654,14 @@ ORDER BY ?person DESC(?confidence)`,
           )}
         </section>
       </div>
+
+      {/* API Endpoints Section */}
+      <section className="dashboard-section endpoints-section">
+        <div className="section-header">
+          <h2><CodeIcon size={18} /> API Connection</h2>
+        </div>
+        <EndpointInfo />
+      </section>
     </div>
   )
 }
