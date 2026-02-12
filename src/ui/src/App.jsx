@@ -489,6 +489,7 @@ function App() {
   const [queryResults, setQueryResults] = useState(null)
   const [executing, setExecuting] = useState(false)
   const [error, setError] = useState(null)
+  const [repoLoading, setRepoLoading] = useState(false) // True while a repository graph is being loaded from disk
   
   // View state
   const [viewMode, setViewMode] = useState('table') // 'table' | 'graph' | 'json'
@@ -677,7 +678,7 @@ function App() {
     
     try {
       setError(null)
-      setExecuting(true)
+      if (!repoLoading) setExecuting(true)
       
       const result = await fetchJson(`/repositories/${currentRepo}/sparql`, {
         method: 'POST',
@@ -743,8 +744,10 @@ function App() {
   // Load stats when repo changes
   useEffect(() => {
     if (currentRepo && apiStatus === 'online') {
+      setRepoLoading(true)
       loadStats(currentRepo)
       executeSparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100')
+        .finally(() => setRepoLoading(false))
     }
   }, [currentRepo, apiStatus])
 
@@ -1268,7 +1271,7 @@ function App() {
           <div className="repo-selector">
             <select
               value={currentRepo || ''}
-              onChange={(e) => setCurrentRepo(e.target.value || null)}
+              onChange={(e) => { const name = e.target.value || null; if (name) setRepoLoading(true); setCurrentRepo(name) }}
             >
               <option value="">Select repository...</option>
               {repositories.map(r => (
@@ -1319,7 +1322,8 @@ function App() {
               setTimeout(() => executeSparql(query), 100)
             }}
             onCreateRepo={() => setShowCreateModal(true)}
-            onSelectRepo={setCurrentRepo}
+            onSelectRepo={(name) => { setRepoLoading(true); setCurrentRepo(name) }}
+            repoLoading={repoLoading}
             onRefreshRepos={loadRepositories}
             onOpenImport={() => setShowImportModal(true)}
             theme={theme}
@@ -1334,6 +1338,20 @@ function App() {
           <Starchart theme={theme} currentRepo={currentRepo} />
         ) : (
         <>
+        {/* Repository Loading Overlay */}
+        {repoLoading && (
+          <div className="repo-loading-overlay">
+            <div className="repo-loading-content">
+              <div className="spinner" />
+              <p>Loading <strong>{currentRepo}</strong>...</p>
+              {repositories.find(r => r.name === currentRepo)?.triple_count > 0 && (
+                <p className="repo-loading-detail">
+                  {repositories.find(r => r.name === currentRepo).triple_count.toLocaleString()} triples
+                </p>
+              )}
+            </div>
+          </div>
+        )}
         {/* Query Panel */}
         <div className="query-panel">
           <div className="query-toolbar">

@@ -14,10 +14,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
 from uuid import UUID
+import hashlib
 import json
 import os
 
-from fastapi import FastAPI, HTTPException, Query, Depends, Header, APIRouter
+from fastapi import FastAPI, HTTPException, Query, Request, Depends, Header, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -737,12 +738,24 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
         return {"status": "healthy"}
     
     @app.get("/stats", tags=["Info"])
-    async def stats():
+    async def stats(request: Request):
         """Get store and registry statistics."""
-        return {
-            "store": app.state.store.stats(),
-            "registry": app.state.registry.get_stats(),
+        store_stats = app.state.store.stats()
+        registry_stats = app.state.registry.get_stats()
+        
+        # ETag based on assertion count
+        etag_seed = f"{store_stats.get('active_assertions',0)}-{store_stats.get('total_assertions',0)}"
+        etag = f'W/"{hashlib.md5(etag_seed.encode()).hexdigest()[:16]}"'
+        
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match == etag:
+            return JSONResponse(status_code=304, content=None, headers={"ETag": etag})
+        
+        body = {
+            "store": store_stats,
+            "registry": registry_stats,
         }
+        return JSONResponse(content=body, headers={"ETag": etag, "Cache-Control": "private, max-age=5"})
     
     # ==========================================================================
     # Triples

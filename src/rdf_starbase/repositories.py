@@ -153,7 +153,7 @@ class RepositoryManager:
             # Update stats if store is loaded
             if name in self._stores:
                 stats = self._stores[name].stats()
-                info.triple_count = stats.get("total_assertions", 0)
+                info.triple_count = stats.get("active_assertions", 0)
                 info.subject_count = stats.get("unique_subjects", 0)
                 info.predicate_count = stats.get("unique_predicates", 0)
             
@@ -236,9 +236,9 @@ class RepositoryManager:
         # Check if repository has data
         store = self.get_store(name)
         stats = store.stats()
-        if stats.get("total_assertions", 0) > 0 and not force:
+        if stats.get("active_assertions", 0) > 0 and not force:
             raise ValueError(
-                f"Repository '{name}' contains {stats['total_assertions']} assertions. "
+                f"Repository '{name}' contains {stats['active_assertions']} assertions. "
                 "Use force=True to delete anyway."
             )
         
@@ -304,7 +304,7 @@ class RepositoryManager:
         # Update stats if store is loaded
         if name in self._stores:
             stats = self._stores[name].stats()
-            info.triple_count = stats.get("total_assertions", 0)
+            info.triple_count = stats.get("active_assertions", 0)
             info.subject_count = stats.get("unique_subjects", 0)
             info.predicate_count = stats.get("unique_predicates", 0)
         
@@ -425,12 +425,13 @@ class RepositoryManager:
         """
         result = []
         for name, info in sorted(self._info.items()):
-            # Update stats if store is loaded
+            # Update stats only if store is already loaded (use cached stats)
             if name in self._stores:
                 stats = self._stores[name].stats()
-                info.triple_count = stats.get("total_assertions", 0)
+                info.triple_count = stats.get("active_assertions", 0)
                 info.subject_count = stats.get("unique_subjects", 0)
                 info.predicate_count = stats.get("unique_predicates", 0)
+            # Otherwise use persisted metadata counts (already on info)
             result.append(info)
         return result
     

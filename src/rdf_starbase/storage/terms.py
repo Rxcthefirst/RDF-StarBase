@@ -148,6 +148,113 @@ class Term:
 
 
 # =============================================================================
+# Lazy Term Lookup (dict-like, defers Term creation to access time)
+# =============================================================================
+
+class LazyTermLookup:
+    """
+    Dict-like container that stores raw column data and creates Term objects
+    on demand. This avoids materializing 12M+ Term dataclass instances during
+    store loading, reducing load time from ~70s to ~3s for large datasets.
+    
+    Supports the full dict protocol used by TermDict._id_to_term consumers:
+    __getitem__, get, __contains__, __len__, __setitem__, items, keys, values.
+    """
+    __slots__ = ('_term_ids', '_kinds', '_lexes', '_id_index', '_cache', '_extra')
+
+    def __init__(self, term_ids: list, kinds: list, lexes: list):
+        self._term_ids = term_ids
+        self._kinds = kinds     # raw int values matching TermKind
+        self._lexes = lexes
+        # C-level dict construction: term_id → array index
+        self._id_index: dict[int, int] = dict(zip(term_ids, range(len(term_ids))))
+        self._cache: dict[int, Term] = {}     # materialized Term objects
+        self._extra: dict[int, Term] = {}     # terms added after load
+
+    def __getitem__(self, term_id: int) -> Term:
+        # Post-load additions first
+        extra = self._extra.get(term_id)
+        if extra is not None:
+            return extra
+        # Materialized cache
+        cached = self._cache.get(term_id)
+        if cached is not None:
+            return cached
+        # Lazy-create from raw data
+        idx = self._id_index.get(term_id)
+        if idx is None:
+            raise KeyError(term_id)
+        term = Term(kind=TermKind(self._kinds[idx]), lex=self._lexes[idx])
+        self._cache[term_id] = term
+        return term
+
+    def get(self, term_id: int, default=None):
+        try:
+            return self[term_id]
+        except KeyError:
+            return default
+
+    def __contains__(self, term_id: int) -> bool:
+        return term_id in self._id_index or term_id in self._extra
+
+    def __len__(self) -> int:
+        extra_new = sum(1 for k in self._extra if k not in self._id_index)
+        return len(self._id_index) + extra_new
+
+    def __setitem__(self, term_id: int, term: Term):
+        self._extra[term_id] = term
+        self._cache[term_id] = term
+
+    def __bool__(self) -> bool:
+        return len(self._id_index) > 0 or len(self._extra) > 0
+
+    def items(self):
+        """Yield all (term_id, Term) pairs. Materializes Terms on demand."""
+        seen = set()
+        for tid in self._term_ids:
+            seen.add(tid)
+            if tid in self._extra:
+                yield tid, self._extra[tid]
+            else:
+                yield tid, self[tid]
+        for tid, term in self._extra.items():
+            if tid not in seen:
+                yield tid, term
+
+    def keys(self):
+        seen = set()
+        for tid in self._term_ids:
+            seen.add(tid)
+            yield tid
+        for tid in self._extra:
+            if tid not in seen:
+                yield tid
+
+    def values(self):
+        for _, v in self.items():
+            yield v
+
+    def build_literal_float_map(self) -> dict[int, float]:
+        """Build TermId→float map from raw data without creating Term objects."""
+        lit_kind = TermKind.LITERAL.value
+        result: dict[int, float] = {}
+        for i, kind in enumerate(self._kinds):
+            if kind == lit_kind:
+                try:
+                    result[self._term_ids[i]] = float(self._lexes[i])
+                except (ValueError, TypeError):
+                    continue
+        # Include any extra literals added after load
+        for tid, term in self._extra.items():
+            if term.kind == TermKind.LITERAL and tid not in result:
+                try:
+                    result[tid] = float(term.lex)
+                except (ValueError, TypeError):
+                    continue
+        return result
+
+
+# =============================================================================
 # Term Dictionary
 # =============================================================================
 
@@ -235,6 +342,23 @@ class TermDict:
         If the term already exists, returns the existing ID.
         Otherwise, allocates a new ID and stores the term.
         """
+        # Fast path: check kind-specific caches before hash lookup.
+        # This avoids needing _hash_to_id for the common case and is
+        # essential for correctness when _hash_to_id is lazily populated.
+        if term.datatype_id is None and term.lang is None:
+            if term.kind == TermKind.IRI:
+                cached = self._iri_cache.get(term.lex)
+                if cached is not None:
+                    return cached
+            elif term.kind == TermKind.LITERAL:
+                cached = self._plain_literal_cache.get(term.lex)
+                if cached is not None:
+                    return cached
+            elif term.kind == TermKind.BNODE:
+                cached = self._bnode_cache.get(term.lex)
+                if cached is not None:
+                    return cached
+
         term_hash = term.compute_hash()
         
         if term_hash in self._hash_to_id:
@@ -493,23 +617,17 @@ class TermDict:
         return instance
     
     def _restore_well_known(self):
-        """Restore well-known datatype ID references after loading."""
-        for term_id, term in self._id_to_term.items():
-            if term.kind == TermKind.IRI:
-                if term.lex == self.XSD_STRING:
-                    self.xsd_string_id = term_id
-                elif term.lex == self.XSD_INTEGER:
-                    self.xsd_integer_id = term_id
-                elif term.lex == self.XSD_DECIMAL:
-                    self.xsd_decimal_id = term_id
-                elif term.lex == self.XSD_DOUBLE:
-                    self.xsd_double_id = term_id
-                elif term.lex == self.XSD_BOOLEAN:
-                    self.xsd_boolean_id = term_id
-                elif term.lex == self.XSD_DATETIME:
-                    self.xsd_datetime_id = term_id
-                elif term.lex == self.RDF_LANGSTRING:
-                    self.rdf_langstring_id = term_id
+        """Restore well-known datatype ID references after loading.
+        
+        Uses _iri_cache for O(1) lookup instead of scanning all terms.
+        """
+        self.xsd_string_id = self._iri_cache.get(self.XSD_STRING)
+        self.xsd_integer_id = self._iri_cache.get(self.XSD_INTEGER)
+        self.xsd_decimal_id = self._iri_cache.get(self.XSD_DECIMAL)
+        self.xsd_double_id = self._iri_cache.get(self.XSD_DOUBLE)
+        self.xsd_boolean_id = self._iri_cache.get(self.XSD_BOOLEAN)
+        self.xsd_datetime_id = self._iri_cache.get(self.XSD_DATETIME)
+        self.rdf_langstring_id = self._iri_cache.get(self.RDF_LANGSTRING)
     
     # =========================================================================
     # Convenience methods for common term types (OPTIMIZED)
@@ -753,6 +871,11 @@ class TermDict:
         Returns a dict for all literals that can be parsed as floats.
         Used for vectorized confidence filtering.
         """
+        # Fast path: LazyTermLookup can build map from raw data without
+        # materializing Term objects
+        if isinstance(self._id_to_term, LazyTermLookup):
+            return self._id_to_term.build_literal_float_map()
+        
         result = {}
         for term_id, term in self._id_to_term.items():
             if term.kind == TermKind.LITERAL:
@@ -762,26 +885,63 @@ class TermDict:
                     continue
         return result
     
+    def get_lex_batch(self, term_ids) -> dict[int, str]:
+        """
+        Batch lookup of lexical forms for a set of term IDs.
+        
+        Returns dict mapping term_id → lex string.
+        Uses LazyTermLookup raw data when available (no Term objects created).
+        """
+        id_to_term = self._id_to_term
+        
+        # Fast path for LazyTermLookup — use raw arrays
+        if isinstance(id_to_term, LazyTermLookup):
+            result: dict[int, str] = {}
+            for tid in term_ids:
+                # Check extra (post-load) terms first
+                extra = id_to_term._extra.get(tid)
+                if extra is not None:
+                    result[tid] = extra.lex
+                    continue
+                # Check cached materialized terms
+                cached = id_to_term._cache.get(tid)
+                if cached is not None:
+                    result[tid] = cached.lex
+                    continue
+                # Direct raw data access — no Term object created
+                idx = id_to_term._id_index.get(tid)
+                if idx is not None:
+                    result[tid] = id_to_term._lexes[idx]
+            return result
+        
+        # Standard dict path
+        result = {}
+        for tid in term_ids:
+            term = id_to_term.get(tid)
+            if term is not None:
+                result[tid] = term.lex
+        return result
+    
     def get_lex_series(self, term_ids: pl.Series) -> pl.Series:
         """
         Vectorized lookup of lexical forms for a series of term IDs.
         
         Returns a Utf8 Series with lexical forms (null for missing IDs).
         """
-        # Build a mapping dict for the unique IDs in the series
-        unique_ids = term_ids.unique().to_list()
-        id_to_lex = {}
-        for tid in unique_ids:
-            if tid is not None:
-                term = self._id_to_term.get(tid)
-                if term is not None:
-                    id_to_lex[tid] = term.lex
+        unique_ids = [tid for tid in term_ids.unique().to_list() if tid is not None]
+        id_to_lex = self.get_lex_batch(unique_ids)
         
-        # Map using Polars map_elements for compatibility
-        return term_ids.map_elements(
-            lambda x: id_to_lex.get(x) if x is not None else None,
-            return_dtype=pl.Utf8
-        )
+        # Use Polars replace for vectorized mapping
+        if not id_to_lex:
+            return pl.Series(term_ids.name, [None] * len(term_ids), dtype=pl.Utf8)
+        
+        lookup_df = pl.DataFrame({
+            "_key": pl.Series(list(id_to_lex.keys()), dtype=pl.UInt64),
+            "_val": pl.Series(list(id_to_lex.values()), dtype=pl.Utf8),
+        })
+        
+        tmp = pl.DataFrame({"_key": term_ids}).join(lookup_df, on="_key", how="left")
+        return tmp["_val"].rename(term_ids.name)
 
     def stats(self) -> dict:
         """Return statistics about the term dictionary."""

@@ -15,6 +15,8 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
   const [exportFormat, setExportFormat] = useState('turtle')
   const [selectedFile, setSelectedFile] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(null)
+  const [graphTarget, setGraphTarget] = useState('default')
+  const [customGraphUri, setCustomGraphUri] = useState('')
   const fileInputRef = useRef(null)
 
   const isDark = theme === 'dark'
@@ -76,6 +78,12 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
     const formData = new FormData()
     formData.append('file', selectedFile)
     formData.append('format', importFormat)
+    const resolvedGraph = graphTarget === 'named' ? customGraphUri
+                        : graphTarget === 'auto' ? 'auto'
+                        : 'default'
+    if (resolvedGraph && resolvedGraph !== 'default') {
+      formData.append('graph_target', resolvedGraph)
+    }
 
     const xhr = new XMLHttpRequest()
 
@@ -202,13 +210,19 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
       setError(null)
       setSuccess(null)
 
+      const importBody = {
+        data: importText,
+        format: importFormat,
+      }
+      if (graphTarget === 'named' && customGraphUri) {
+        importBody.graph_target = customGraphUri
+      } else if (graphTarget === 'auto') {
+        importBody.graph_target = 'auto'
+      }
       const response = await fetch(`${API_BASE}/repositories/${repositoryName}/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          data: importText,
-          format: importFormat
-        })
+        body: JSON.stringify(importBody)
       })
 
       if (!response.ok) {
@@ -328,6 +342,33 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
               </optgroup>
             </select>
           </div>
+
+          {/* Named Graph Target */}
+          <div className="ie-row">
+            <label>Graph:</label>
+            <select
+              value={graphTarget}
+              onChange={e => setGraphTarget(e.target.value)}
+              className="ie-select"
+            >
+              <option value="default">Default Graph</option>
+              <option value="named">Named Graph</option>
+              <option value="auto">Auto (from filename)</option>
+            </select>
+          </div>
+
+          {graphTarget === 'named' && (
+            <div className="ie-row">
+              <label>URI:</label>
+              <input
+                type="text"
+                className="ie-input"
+                value={customGraphUri}
+                onChange={e => setCustomGraphUri(e.target.value)}
+                placeholder="http://example.org/graph/my-data"
+              />
+            </div>
+          )}
 
           {/* File Upload */}
           <div className="ie-file-row">
@@ -557,7 +598,7 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
           min-width: 60px;
         }
         
-        .ie-select {
+        .ie-select, .ie-input {
           flex: 1;
           padding: 0.5rem;
           border-radius: 6px;
@@ -565,13 +606,15 @@ export default function ImportExport({ repositoryName, onDataChanged, theme }) {
           border: 1px solid var(--border-color);
         }
         
-        .import-export.dark .ie-select {
+        .import-export.dark .ie-select,
+        .import-export.dark .ie-input {
           background: #313244;
           color: #cdd6f4;
           border-color: #45475a;
         }
         
-        .import-export.light .ie-select {
+        .import-export.light .ie-select,
+        .import-export.light .ie-input {
           background: white;
           color: #1e1e1e;
           border-color: #dee2e6;

@@ -22,6 +22,7 @@ import struct
 
 import polars as pl
 
+from rdf_starbase.storage.indexing import IndexManager, SortedIndex, indexed_filter
 from rdf_starbase.storage.terms import (
     TermId,
     TermKind,
@@ -103,6 +104,13 @@ class FactStore:
         
         # Batch buffer for deferred concat (None = immediate mode)
         self._batch_buffer: Optional[list] = None
+        
+        # Indexes for fast lookups (s, p, o columns)
+        self._index_manager = IndexManager()
+        self._index_manager.create_index("s")
+        self._index_manager.create_index("p")
+        self._index_manager.create_index("o")
+        self._indexes_stale = True
         
         # Pre-intern the default graph marker
         self._default_graph_id = DEFAULT_GRAPH_ID
@@ -332,7 +340,25 @@ class FactStore:
             return 0
         combined = pl.concat(buf, how="vertical")
         self._df = pl.concat([self._df, combined], how="vertical")
+        self._indexes_stale = True
         return len(combined)
+
+    def ensure_indexes(self) -> None:
+        """Rebuild indexes if stale. Called lazily before first indexed query."""
+        if self._indexes_stale and len(self._df) > 0:
+            self._index_manager.build_all(self._df)
+            self._indexes_stale = False
+
+    def lookup_by_index(self, column: str, key: int) -> Optional[pl.DataFrame]:
+        """Use index for O(log n) point lookup. Returns filtered DataFrame or None if no index."""
+        self.ensure_indexes()
+        idx = self._index_manager.get_index(column)
+        if idx is None:
+            return None
+        positions = idx.lookup(key)
+        if not positions:
+            return self._df.head(0)  # empty with same schema
+        return self._df[positions]
 
     def add_facts_with_provenance(
         self,

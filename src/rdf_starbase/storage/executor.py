@@ -287,32 +287,65 @@ class StorageExecutor:
         has_aggregates = any(isinstance(v, AggregateExpression) for v in query.variables)
         
         if has_aggregates or query.group_by:
-            # Handle GROUP BY and aggregates
+            # Handle GROUP BY and aggregates (decode happens inside _apply_aggregates)
             df = self._apply_aggregates(df, query)
-        
-        # Decode term IDs back to lexical forms for output
-        df = self._decode_result(df)
-        
-        # Apply DISTINCT if requested
-        if query.distinct:
-            df = df.unique()
-        
-        # Apply ORDER BY
-        if query.order_by:
-            order_cols = []
-            descending = []
-            for var, asc in query.order_by:
-                if var.name in df.columns:
-                    order_cols.append(var.name)
-                    descending.append(not asc)
-            if order_cols:
-                df = df.sort(order_cols, descending=descending)
-        
-        # Apply LIMIT and OFFSET
-        if query.offset:
-            df = df.slice(query.offset, query.limit or len(df))
-        elif query.limit:
-            df = df.head(query.limit)
+            
+            # Apply DISTINCT if requested
+            if query.distinct:
+                df = df.unique()
+            
+            # Apply ORDER BY
+            if query.order_by:
+                order_cols = []
+                descending = []
+                for var, asc in query.order_by:
+                    if var.name in df.columns:
+                        order_cols.append(var.name)
+                        descending.append(not asc)
+                if order_cols:
+                    df = df.sort(order_cols, descending=descending)
+            
+            # Apply LIMIT and OFFSET
+            if query.offset:
+                df = df.slice(query.offset, query.limit or len(df))
+            elif query.limit:
+                df = df.head(query.limit)
+        else:
+            # Non-aggregate path: apply LIMIT/OFFSET BEFORE decode
+            # when ORDER BY and DISTINCT don't require full data.
+            needs_full_data = bool(query.order_by) or query.distinct
+            
+            if not needs_full_data:
+                # Safe to LIMIT before decode — massive speedup for large datasets
+                if query.offset:
+                    df = df.slice(query.offset, query.limit or len(df))
+                elif query.limit:
+                    df = df.head(query.limit)
+            
+            # Decode term IDs back to lexical forms for output
+            df = self._decode_result(df)
+            
+            if needs_full_data:
+                # Apply DISTINCT if requested
+                if query.distinct:
+                    df = df.unique()
+                
+                # Apply ORDER BY
+                if query.order_by:
+                    order_cols = []
+                    descending = []
+                    for var, asc in query.order_by:
+                        if var.name in df.columns:
+                            order_cols.append(var.name)
+                            descending.append(not asc)
+                    if order_cols:
+                        df = df.sort(order_cols, descending=descending)
+                
+                # Apply LIMIT and OFFSET
+                if query.offset:
+                    df = df.slice(query.offset, query.limit or len(df))
+                elif query.limit:
+                    df = df.head(query.limit)
         
         # Select only requested variables (or all if SELECT *)
         if not query.is_select_all():
@@ -331,7 +364,12 @@ class StorageExecutor:
         return df
     
     def _apply_aggregates(self, df: pl.DataFrame, query: SelectQuery) -> pl.DataFrame:
-        """Apply GROUP BY and aggregate functions."""
+        """Apply GROUP BY and aggregate functions.
+        
+        Groups on integer term IDs when possible, decoding only
+        columns needed for value-sensitive aggregates (SUM, AVG, etc.)
+        before aggregation, then decoding GROUP BY columns after.
+        """
         if len(df) == 0:
             # Create empty result with correct columns
             result_cols = {}
@@ -342,8 +380,41 @@ class StorageExecutor:
                     result_cols[v.alias.name] = pl.Series([], dtype=pl.Int64)
             return pl.DataFrame(result_cols)
         
-        # First decode the columns we'll need for grouping and aggregation
-        df = self._decode_result(df)
+        # Determine which columns need pre-decode for value-sensitive aggs
+        VALUE_AGGS = {"SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT"}
+        cols_needing_decode: set[str] = set()
+        for v in query.variables:
+            if isinstance(v, AggregateExpression):
+                if v.function.upper() in VALUE_AGGS and v.argument is not None:
+                    if isinstance(v.argument, Variable) and v.argument.name in df.columns:
+                        if df.schema[v.argument.name] == pl.UInt64:
+                            cols_needing_decode.add(v.argument.name)
+        
+        # Decode only the columns that need it (before aggregation)
+        if cols_needing_decode:
+            # Collect unique IDs from columns needing decode
+            all_ids: set[int] = set()
+            for col in cols_needing_decode:
+                all_ids.update(
+                    tid for tid in df[col].drop_nulls().unique().to_list()
+                )
+            if all_ids:
+                id_to_lex = self.term_dict.get_lex_batch(all_ids)
+                lookup_df = pl.DataFrame({
+                    "_tid": pl.Series(list(id_to_lex.keys()), dtype=pl.UInt64),
+                    "_lex": pl.Series(list(id_to_lex.values()), dtype=pl.Utf8),
+                })
+                for col in cols_needing_decode:
+                    df = (
+                        df
+                        .join(
+                            lookup_df.rename({"_tid": col, "_lex": f"_dec_{col}"}),
+                            on=col,
+                            how="left",
+                        )
+                        .drop(col)
+                        .rename({f"_dec_{col}": col})
+                    )
         
         # Build the aggregate expressions
         agg_exprs = []
@@ -354,20 +425,20 @@ class StorageExecutor:
                     agg_exprs.append(agg_expr)
         
         if not agg_exprs:
-            return df
+            return self._decode_result(df)
         
-        # Apply GROUP BY if specified
+        # Apply GROUP BY — group columns stay as integer IDs for speed
         if query.group_by:
             group_cols = [g.name for g in query.group_by if isinstance(g, Variable) and g.name in df.columns]
             if group_cols:
                 result = df.group_by(group_cols).agg(agg_exprs)
             else:
-                # No valid group columns - aggregate all
                 result = df.select(agg_exprs)
         else:
-            # No GROUP BY - aggregate the entire dataset
             result = df.select(agg_exprs)
         
+        # Decode the grouped result (tiny — often < 100 rows)
+        result = self._decode_result(result)
         return result
     
     def _build_aggregate_expr(self, agg: AggregateExpression, df: pl.DataFrame) -> Optional[pl.Expr]:
@@ -1519,24 +1590,63 @@ class StorageExecutor:
         return iri
     
     def _decode_result(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Decode integer term IDs back to lexical forms for output."""
+        """Decode integer term IDs back to lexical forms for output.
+        
+        Uses vectorized Polars join instead of Python loops:
+        1. Collect all unique term IDs across all UInt64 columns
+        2. Build a single lookup DataFrame (term_id → lex)
+        3. Left-join each column against it
+        
+        This is O(unique_ids) rather than O(total_rows × columns).
+        """
         if len(df) == 0:
             return df
         
-        # Find columns that contain term IDs (variables and metadata predicates)
-        id_columns = [c for c in df.columns if not c.startswith("_prov")]
+        # Find UInt64 columns that need decoding
+        id_columns = [
+            c for c in df.columns
+            if not c.startswith("_prov") and df.schema[c] == pl.UInt64
+        ]
+        if not id_columns:
+            return df
         
+        # Collect all unique term IDs across all columns to decode
+        all_ids_set: set[int] = set()
         for col in id_columns:
-            if df.schema[col] == pl.UInt64:
-                # Decode this column
-                decoded = []
-                for term_id in df[col].to_list():
-                    if term_id is None:
-                        decoded.append(None)  # Keep NULL for OPTIONAL non-matches
-                    else:
-                        lex = self.term_dict.get_lex(term_id)
-                        decoded.append(lex if lex else f"<unknown:{term_id}>")
-                df = df.with_columns(pl.Series(col, decoded))
+            all_ids_set.update(
+                tid for tid in df[col].drop_nulls().unique().to_list()
+            )
+        
+        if not all_ids_set:
+            # All nulls — just cast columns to Utf8
+            return df.with_columns([
+                pl.col(c).cast(pl.Utf8) for c in id_columns
+            ])
+        
+        # Build lookup dict: term_id → lex
+        id_to_lex = self.term_dict.get_lex_batch(all_ids_set)
+        
+        # Build a Polars lookup DataFrame
+        lookup_ids = list(id_to_lex.keys())
+        lookup_lexes = list(id_to_lex.values())
+        
+        lookup_df = pl.DataFrame({
+            "_tid": pl.Series(lookup_ids, dtype=pl.UInt64),
+            "_lex": pl.Series(lookup_lexes, dtype=pl.Utf8),
+        })
+        
+        # Join each column against the lookup
+        for col in id_columns:
+            df = (
+                df
+                .join(
+                    lookup_df.rename({"_tid": col, "_lex": f"_dec_{col}"}),
+                    on=col,
+                    how="left",
+                )
+                .drop(col)
+                .rename({f"_dec_{col}": col})
+            )
         
         return df
     

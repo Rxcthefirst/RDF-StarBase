@@ -14,11 +14,12 @@ import os
 import time
 import uuid
 import json
+import hashlib
 import tempfile
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 import polars as pl
 
@@ -415,12 +416,57 @@ def create_repository_router(
     
     @router.get("")
     async def list_repositories():
-        """List all repositories."""
+        """List all repositories with inline stats."""
         repos = manager.list_repositories()
         return {
             "count": len(repos),
             "repositories": [RepositoryResponse.from_info(r).model_dump() for r in repos]
         }
+    
+    @router.get("/bulk-stats")
+    async def bulk_repository_stats():
+        """Get stats for all repositories in a single call.
+        
+        Returns a dict keyed by repository name with stats for each.
+        Avoids N separate /stats calls from the client.
+        Only computes stats for already-loaded stores; unloaded repos
+        return their persisted metadata counts.
+        """
+        def _compute_bulk():
+            result: dict[str, dict] = {}
+            for name in sorted(manager._info):
+                info = manager._info[name]
+                if name in manager._stores:
+                    raw = manager._stores[name].stats()
+                    result[name] = {
+                        "name": name,
+                        "description": info.description,
+                        "created_at": info.created_at.isoformat(),
+                        "triple_count": raw.get("active_assertions", 0),
+                        "subject_count": raw.get("unique_subjects", 0),
+                        "predicate_count": raw.get("unique_predicates", 0),
+                        "object_count": raw.get("term_dict", {}).get("total_terms", 0),
+                        "graph_count": raw.get("fact_store", {}).get("graphs", 0),
+                        "source_count": raw.get("unique_sources", 0),
+                        "loaded": True,
+                    }
+                else:
+                    result[name] = {
+                        "name": name,
+                        "description": info.description,
+                        "created_at": info.created_at.isoformat(),
+                        "triple_count": info.triple_count,
+                        "subject_count": info.subject_count,
+                        "predicate_count": info.predicate_count,
+                        "object_count": 0,
+                        "graph_count": 0,
+                        "source_count": 0,
+                        "loaded": False,
+                    }
+            return result
+        
+        result = await asyncio.to_thread(_compute_bulk)
+        return {"repositories": result}
     
     @router.post("")
     async def create_repository(request: CreateRepositoryRequest):
@@ -566,12 +612,12 @@ def create_repository_router(
     async def repository_sparql(name: str, request: SPARQLQueryRequest):
         """Execute a SPARQL query against a specific repository."""
         try:
-            store = manager.get_store(name)
+            store = await asyncio.to_thread(manager.get_store, name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         
         try:
-            result = execute_sparql(store, request.query)
+            result = await asyncio.to_thread(execute_sparql, store, request.query)
             
             if isinstance(result, bool):
                 # ASK query
@@ -605,7 +651,7 @@ def create_repository_router(
     # =========================================================================
     
     @router.get("/{name}/ontology")
-    async def get_repository_ontology(name: str):
+    async def get_repository_ontology(name: str, request: Request):
         """
         Extract ontology (classes and properties) from the repository.
         
@@ -619,77 +665,16 @@ def create_repository_router(
         Returns structured data for the Starchart mapper.
         """
         try:
-            store = manager.get_store(name)
+            store = await asyncio.to_thread(manager.get_store, name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         
-        # Query for classes
-        classes_query = """
-        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-        PREFIX owl: <http://www.w3.org/2002/07/owl#>
-        PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-        PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
-        
-        SELECT DISTINCT ?class ?label ?comment WHERE {
-            { ?class a owl:Class }
-            UNION
-            { ?class a rdfs:Class }
-            OPTIONAL { ?class rdfs:label ?label }
-            OPTIONAL { ?class rdfs:comment ?comment }
-            FILTER (!isBlank(?class))
-        }
-        """
-        
-        # Query for properties
-        properties_query = """
-        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-        PREFIX owl: <http://www.w3.org/2002/07/owl#>
-        PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-        PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
-        
-        SELECT DISTINCT ?prop ?label ?comment ?domain ?range WHERE {
-            { ?prop a owl:DatatypeProperty }
-            UNION
-            { ?prop a owl:ObjectProperty }
-            UNION
-            { ?prop a rdf:Property }
-            UNION
-            { ?prop a rdfs:Property }
-            OPTIONAL { ?prop rdfs:label ?label }
-            OPTIONAL { ?prop rdfs:comment ?comment }
-            OPTIONAL { ?prop rdfs:domain ?domain }
-            OPTIONAL { ?prop rdfs:range ?range }
-            FILTER (!isBlank(?prop))
-        }
-        """
-        
-        # Query for aliases (skos:altLabel)
-        aliases_query = """
-        PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
-        
-        SELECT ?subject ?alias WHERE {
-            ?subject skos:altLabel ?alias
-        }
-        """
-        
         try:
-            # Execute queries
-            classes_result = execute_sparql(store, classes_query)
-            properties_result = execute_sparql(store, properties_query)
-            aliases_result = execute_sparql(store, aliases_query)
-            
-            # Build alias lookup
-            aliases_map = {}
-            if isinstance(aliases_result, pl.DataFrame) and len(aliases_result) > 0:
-                for row in aliases_result.to_dicts():
-                    subj = row.get('subject', '')
-                    alias = row.get('alias', '')
-                    if subj and alias:
-                        if subj not in aliases_map:
-                            aliases_map[subj] = []
-                        # Clean up literal formatting
-                        alias_clean = alias.strip('"').split('@')[0].strip('"')
-                        aliases_map[subj].append(alias_clean)
+            # ── Fast integer-level ontology extraction ───────────────
+            raw = await asyncio.to_thread(store.get_ontology_summary)
+
+            # Build alias lookup (already built by store method)
+            aliases_map = raw.get("aliases_map", {})
             
             # Standard prefixes
             known_prefixes = {
@@ -731,22 +716,45 @@ def create_repository_router(
                 if namespace in discovered_namespaces:
                     return discovered_namespaces[namespace]
                 # Create new prefix based on namespace
+                # Use last path segment as hint, but disambiguate collisions
+                # e.g. gleif.org/ontology/L1/ and rdf.gleif.org/L1/ both have "L1"
                 local_hint = namespace.rstrip('#/').rsplit('/', 1)[-1]
                 if local_hint and local_hint[0].isalpha() and len(local_hint) <= 10:
                     prefix = local_hint.lower().replace('-', '_')
                 else:
                     prefix = f'ns{prefix_counter}'
                     prefix_counter += 1
+                # Disambiguate if prefix already used by a different namespace
+                used_prefixes = set(discovered_namespaces.values())
+                if prefix in used_prefixes:
+                    # Try adding parent path segment(s) for disambiguation
+                    parts = namespace.rstrip('#/').split('/')
+                    # Walk backward through path segments to find unique combo
+                    for depth in range(2, min(len(parts), 5)):
+                        combo = '_'.join(
+                            p.lower().replace('-', '_')
+                            for p in parts[-depth:] if p
+                        )
+                        if combo and combo not in used_prefixes:
+                            prefix = combo
+                            break
+                    else:
+                        # Fallback to numbered prefix
+                        prefix = f'ns{prefix_counter}'
+                        prefix_counter += 1
                 discovered_namespaces[namespace] = prefix
                 return prefix
             
             # Pre-scan URIs to discover namespaces
-            all_uris = []
-            if isinstance(classes_result, pl.DataFrame) and len(classes_result) > 0:
-                all_uris.extend(row.get('class', '') for row in classes_result.to_dicts())
-            if isinstance(properties_result, pl.DataFrame) and len(properties_result) > 0:
-                for row in properties_result.to_dicts():
-                    all_uris.extend([row.get('prop', ''), row.get('domain', ''), row.get('range', '')])
+            all_uris: list[str] = []
+            for c in raw["classes"]:
+                all_uris.append(c["uri"])
+            for p in raw["properties"]:
+                all_uris.append(p["uri"])
+                if p.get("domain"):
+                    all_uris.append(p["domain"])
+                if p.get("range"):
+                    all_uris.append(p["range"])
             
             for uri in all_uris:
                 if uri:
@@ -773,53 +781,40 @@ def create_repository_router(
                     return uri.split('/')[-1]
                 return uri
             
-            def clean_literal(val):
-                if not val:
-                    return None
-                return val.strip('"').split('@')[0].strip('"').split('^^')[0].strip('"')
-            
             # Process classes
             classes = []
-            if isinstance(classes_result, pl.DataFrame) and len(classes_result) > 0:
-                for row in classes_result.to_dicts():
-                    uri = row.get('class', '')
-                    if not uri:
-                        continue
-                    classes.append({
-                        'uri': compact_uri(uri),
-                        'label': clean_literal(row.get('label')) or extract_label(uri),
-                        'description': clean_literal(row.get('comment')),
-                        'properties': [],  # Will be filled by domain matching
-                    })
+            for c in raw["classes"]:
+                uri = c["uri"]
+                classes.append({
+                    'uri': compact_uri(uri),
+                    'label': c.get("label") or extract_label(uri),
+                    'description': c.get("comment"),
+                    'properties': [],  # Will be filled by domain matching
+                })
             
             # Process properties
             properties = []
-            if isinstance(properties_result, pl.DataFrame) and len(properties_result) > 0:
-                for row in properties_result.to_dicts():
-                    uri = row.get('prop', '')
-                    if not uri:
-                        continue
-                    
-                    domain = row.get('domain')
-                    domain_compact = compact_uri(domain) if domain else None
-                    
-                    prop_obj = {
-                        'uri': compact_uri(uri),
-                        'label': clean_literal(row.get('label')) or extract_label(uri),
-                        'aliases': aliases_map.get(uri, []),
-                        'description': clean_literal(row.get('comment')),
-                        'domain': domain_compact,
-                        'range': compact_uri(row.get('range')) if row.get('range') else 'xsd:string',
-                    }
-                    properties.append(prop_obj)
-                    
-                    # Associate property with class by domain
-                    if domain_compact:
-                        for cls in classes:
-                            if cls['uri'] == domain_compact:
-                                cls['properties'].append(prop_obj['uri'])
+            for p in raw["properties"]:
+                uri = p["uri"]
+                domain_compact = compact_uri(p.get("domain")) if p.get("domain") else None
+                
+                prop_obj = {
+                    'uri': compact_uri(uri),
+                    'label': p.get("label") or extract_label(uri),
+                    'aliases': p.get("aliases", []),
+                    'description': p.get("comment"),
+                    'domain': domain_compact,
+                    'range': compact_uri(p.get("range")) if p.get("range") else 'xsd:string',
+                }
+                properties.append(prop_obj)
+                
+                # Associate property with class by domain
+                if domain_compact:
+                    for cls in classes:
+                        if cls['uri'] == domain_compact:
+                            cls['properties'].append(prop_obj['uri'])
             
-            return {
+            body = {
                 'success': True,
                 'repository': name,
                 'classes': classes,
@@ -829,6 +824,16 @@ def create_repository_router(
                 # Return inverted prefix map (prefix -> namespace)
                 'prefixes': {prefix: ns for ns, prefix in discovered_namespaces.items()},
             }
+            
+            # ETag based on class/property counts and store size
+            etag_seed = f"{len(classes)}-{len(properties)}-{len(store)}"
+            etag = f'W/"{hashlib.md5(etag_seed.encode()).hexdigest()[:16]}"'
+            
+            if_none_match = request.headers.get("if-none-match")
+            if if_none_match and if_none_match == etag:
+                return JSONResponse(status_code=304, content=None, headers={"ETag": etag})
+            
+            return JSONResponse(content=body, headers={"ETag": etag, "Cache-Control": "private, max-age=30"})
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to extract ontology: {str(e)}")
@@ -892,31 +897,64 @@ def create_repository_router(
     # =========================================================================
     
     @router.get("/{name}/stats")
-    async def get_repository_stats(name: str):
-        """Get detailed statistics for a repository."""
+    async def get_repository_stats(name: str, request: Request):
+        """Get detailed statistics for a repository.
+        
+        Returns persisted metadata counts instantly if the store is not
+        already loaded in memory.  Only computes live stats (unique
+        subjects, graph count, etc.) when the store happens to be loaded.
+        This prevents a 12+ second disk load just to show dashboard cards.
+        """
         try:
-            store = manager.get_store(name)
             info = manager.get_info(name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         
-        raw_stats = store.stats()
+        # If store is already in memory, use live stats
+        loaded = name in manager._stores
+        if loaded:
+            raw_stats = await asyncio.to_thread(manager._stores[name].stats)
+            triple_count = raw_stats.get("active_assertions", 0)
+            subject_count = raw_stats.get("unique_subjects", 0)
+            predicate_count = raw_stats.get("unique_predicates", 0)
+            object_count = raw_stats.get("term_dict", {}).get("total_terms", 0)
+            graph_count = raw_stats.get("fact_store", {}).get("graphs", 0)
+            source_count = raw_stats.get("unique_sources", 0)
+            details = raw_stats
+        else:
+            # Use persisted metadata — instant, no disk load
+            triple_count = info.triple_count
+            subject_count = info.subject_count
+            predicate_count = info.predicate_count
+            object_count = 0
+            graph_count = 0
+            source_count = 0
+            details = None
         
-        # Flatten and provide friendly names for UI consumption
-        return {
+        # Build ETag
+        etag_seed = f"{triple_count}-{subject_count}-{predicate_count}-{loaded}"
+        etag = f'W/"{hashlib.md5(etag_seed.encode()).hexdigest()[:16]}"'
+        
+        # Check If-None-Match
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match == etag:
+            return JSONResponse(status_code=304, content=None, headers={"ETag": etag})
+        
+        body = {
             "name": name,
             "description": info.description,
             "created_at": info.created_at.isoformat(),
-            # Primary stats with UI-friendly names
-            "triple_count": raw_stats.get("active_assertions", 0),
-            "subject_count": raw_stats.get("unique_subjects", 0),
-            "predicate_count": raw_stats.get("unique_predicates", 0),
-            "object_count": raw_stats.get("term_dict", {}).get("total_terms", 0),
-            "graph_count": raw_stats.get("fact_store", {}).get("graphs", 0),
-            "source_count": raw_stats.get("unique_sources", 0),
-            # Detailed stats for advanced views
-            "details": raw_stats,
+            "triple_count": triple_count,
+            "subject_count": subject_count,
+            "predicate_count": predicate_count,
+            "object_count": object_count,
+            "graph_count": graph_count,
+            "source_count": source_count,
+            "loaded": loaded,
         }
+        if details is not None:
+            body["details"] = details
+        return JSONResponse(content=body, headers={"ETag": etag, "Cache-Control": "private, max-age=5"})
     
     # =========================================================================
     # Import / Export
@@ -1071,6 +1109,10 @@ def create_repository_router(
         
         Formats with RDF-Star support: turtle, ntriples, trig
         
+        For Turtle/N-Triples files without RDF-Star, uses streaming Oxigraph
+        parsing with chunked insertion to avoid loading the entire file into
+        memory.
+        
         Graph target options:
         - 'default' or omit: Load into the default graph
         - 'named:<uri>': Load into a specific named graph
@@ -1090,25 +1132,71 @@ def create_repository_router(
         # Resolve graph target (with filename for 'auto' mode)
         target_graph = _resolve_graph_target(graph_target, file.filename)
         
+        # Stream upload to temp file to avoid holding entire file in memory
+        safe_name = (file.filename or 'data').replace(os.sep, '_')
+        tmp = tempfile.NamedTemporaryFile(
+            delete=False, suffix=f"_{safe_name}", dir=tempfile.gettempdir()
+        )
+        try:
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+        finally:
+            tmp.close()
+        tmp_path = tmp.name
+        
         try:
             start_time = time.time()
+            default_source = f"file:{file.filename}"
             
-            # Read file content
-            content = await file.read()
+            # --- Try bulk_load_file (high-performance direct path) ---
+            try:
+                count = store.bulk_load_file(
+                    tmp_path,
+                    graph_uri=target_graph,
+                    source=default_source,
+                )
+                manager.save(name)
+                total_time = time.time() - start_time
+                triples_per_sec = count / total_time if total_time > 0 else 0
+                
+                return {
+                    "success": True,
+                    "filename": file.filename,
+                    "format": format,
+                    "triples_added": count,
+                    "graph": target_graph,
+                    "timing": {
+                        "parse_seconds": round(total_time, 3),
+                        "insert_seconds": round(total_time, 3),
+                        "total_seconds": round(total_time, 3),
+                        "triples_per_second": round(triples_per_sec, 0),
+                    },
+                    "message": f"Imported {count} triples in {total_time:.2f}s"
+                              + (f" into graph <{target_graph}>" if target_graph else "")
+                }
+            except Exception:
+                pass  # fall through to legacy path
             
-            # Handle binary format specially
+            # --- Legacy path: read file, parse in memory ---
+            with open(tmp_path, 'rb') as f:
+                content = f.read()
+            
             if format == "binaryrdf":
                 triples = _parse_binary_rdf(content)
             else:
                 data = content.decode('utf-8')
+                del content
                 triples = _parse_rdf_data(data, format)
+                del data
             
             parse_time = time.time() - start_time
             
             insert_start = time.time()
             
             # Extract RDF-Star annotations and base triples
-            default_source = f"file:{file.filename}"
             rdfstar_data = extract_rdfstar_annotations(triples, default_source=default_source)
             base_triples = rdfstar_data["base_triples"]
             annotations = rdfstar_data["annotations"]
@@ -1132,7 +1220,6 @@ def create_repository_router(
                 prov_groups[prov_key].append((s, p, o))
             
             # Batch columnar insert for each provenance group
-            # Use bulk insert mode to defer DataFrame concat
             store.begin_bulk_insert()
             count = 0
             for (source, confidence), triples_list in prov_groups.items():
@@ -1173,6 +1260,11 @@ def create_repository_router(
             }
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     # =========================================================================
     # Staged Upload with Progress (two-phase)
@@ -1186,7 +1278,7 @@ def create_repository_router(
         graph_target: str = Form(None),
     ):
         """
-        Phase 1: Stage a file upload. Saves the file to a temp location
+        Phase 1: Stage a file upload. Streams the file to a temp location
         and returns a stage_id. Use GET /{name}/upload-process/{stage_id}
         to start processing with SSE progress events.
         """
@@ -1200,23 +1292,38 @@ def create_repository_router(
             ext = file.filename.split('.')[-1].lower() if file.filename else ''
             format = FORMAT_EXTENSIONS.get(ext, 'turtle')
 
-        content = await file.read()
+        # Stream to temp file instead of holding entire file in memory
+        safe_name = (file.filename or 'data').replace(os.sep, '_')
+        tmp = tempfile.NamedTemporaryFile(
+            delete=False, suffix=f"_{safe_name}", dir=tempfile.gettempdir()
+        )
+        file_size = 0
+        try:
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)  # 8 MB chunks
+                if not chunk:
+                    break
+                tmp.write(chunk)
+                file_size += len(chunk)
+        finally:
+            tmp.close()
+
         stage_id = str(uuid.uuid4())
 
         _staged_uploads[stage_id] = {
-            "content": content,
+            "temp_path": tmp.name,
             "filename": file.filename,
             "format": format,
             "graph_target": graph_target,
             "repo_name": name,
-            "size": len(content),
+            "size": file_size,
             "staged_at": time.time(),
         }
 
         return {
             "stage_id": stage_id,
             "filename": file.filename,
-            "size": len(content),
+            "size": file_size,
             "format": format,
         }
 
@@ -1225,6 +1332,10 @@ def create_repository_router(
         """
         Phase 2: Process a staged upload with SSE progress events.
         Streams events: parsing, inserting (with progress/ETA), done, error.
+        
+        For Turtle/N-Triples files without RDF-Star, uses streaming
+        Oxigraph parsing with chunked insertion to avoid loading the
+        entire file into memory.
         """
         if stage_id not in _staged_uploads:
             raise HTTPException(status_code=404, detail="Stage ID not found or expired")
@@ -1234,24 +1345,96 @@ def create_repository_router(
             raise HTTPException(status_code=400, detail="Repository mismatch")
 
         async def event_stream():
+            temp_path = staged.get("temp_path")
             try:
                 store = manager.get_store(name)
-                content = staged["content"]
                 fmt = staged["format"]
                 filename = staged["filename"]
                 graph_target = staged.get("graph_target")
                 target_graph = _resolve_graph_target(graph_target, filename)
+                default_source = f"file:{filename}"
 
-                # --- Phase: Parsing ---
-                yield _sse({"phase": "parsing", "progress": 0, "message": "Parsing RDF data..."})
-                await asyncio.sleep(0)  # yield control
+                # ----------------------------------------------------------
+                # Try bulk_load_file (high-performance direct path)
+                # ----------------------------------------------------------
+                can_bulk = False
+                if temp_path and hasattr(store, 'bulk_load_file'):
+                    # bulk_load_file handles format detection, RDF-Star fallback,
+                    # and pyoxigraph availability internally.
+                    _bulk_formats = {"turtle", "ttl", "ntriples", "nt"}
+                    fmt_key = fmt.lower().replace('-', '').replace('_', '').replace(' ', '')
+                    if fmt_key in _bulk_formats:
+                        can_bulk = True
+
+                if can_bulk:
+                    yield _sse({"phase": "parsing", "progress": 0,
+                                "message": "Bulk loading RDF data…"})
+                    await asyncio.sleep(0)
+
+                    parse_start = time.time()
+                    last_report = [parse_start]
+
+                    def _progress(loaded):
+                        """Called by bulk_load_file every 2M triples."""
+                        now = time.time()
+                        last_report[0] = now
+
+                    try:
+                        count = store.bulk_load_file(
+                            temp_path,
+                            graph_uri=target_graph,
+                            source=default_source,
+                            on_progress=_progress,
+                        )
+                    except Exception as bulk_err:
+                        # fall through to legacy path
+                        can_bulk = False
+
+                if can_bulk:
+                    parse_time = time.time() - parse_start
+
+                    # --- Phase: Saving ---
+                    yield _sse({"phase": "saving", "progress": 100,
+                                "message": "Saving repository..."})
+                    await asyncio.sleep(0)
+                    manager.save(name)
+
+                    total_time = parse_time
+                    triples_per_sec = count / total_time if total_time > 0 else 0
+                    yield _sse({
+                        "phase": "done", "progress": 100,
+                        "triples_added": count, "total_triples": count,
+                        "timing": {
+                            "parse_seconds": round(parse_time, 3),
+                            "insert_seconds": round(parse_time, 3),
+                            "total_seconds": round(total_time, 3),
+                            "triples_per_second": round(triples_per_sec),
+                        },
+                        "message": f"Imported {count:,} triples in {total_time:.2f}s",
+                    })
+                    return  # done — skip legacy path
+
+                # ----------------------------------------------------------
+                # Legacy path: read file into memory, parse, then insert
+                # ----------------------------------------------------------
+                yield _sse({"phase": "parsing", "progress": 0,
+                            "message": "Parsing RDF data..."})
+                await asyncio.sleep(0)
 
                 parse_start = time.time()
+                if temp_path:
+                    with open(temp_path, 'rb') as f:
+                        content = f.read()
+                else:
+                    content = staged.get("content", b"")
+
                 if fmt == "binaryrdf":
                     triples = _parse_binary_rdf(content)
                 else:
                     data = content.decode('utf-8')
+                    del content  # free the bytes copy
                     triples = _parse_rdf_data(data, fmt)
+                    del data  # free the string copy
                 parse_time = time.time() - parse_start
 
                 total_triples = len(triples)
@@ -1362,6 +1545,13 @@ def create_repository_router(
                 })
             except Exception as e:
                 yield _sse({"phase": "error", "message": str(e)})
+            finally:
+                # Clean up temp file
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
 
         return StreamingResponse(
             event_stream(),

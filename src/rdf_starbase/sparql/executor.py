@@ -549,112 +549,166 @@ class SPARQLExecutor:
         # Handle FROM clause - restrict to specified graphs
         from_graphs = None
         if query.from_graphs:
-            # Merge all FROM graphs into default graph behavior
-            # Expand prefixed names to full IRIs
             from_graphs = []
             for g in query.from_graphs:
                 graph_iri = g.value
-                # Expand prefixed names
                 if ":" in graph_iri and not graph_iri.startswith("http"):
                     prefix, local = graph_iri.split(":", 1)
                     if prefix in query.prefixes:
                         graph_iri = query.prefixes[prefix] + local
                 from_graphs.append(graph_iri)
         
-        # Fast path for simple COUNT(*) queries: SELECT (COUNT(*) AS ?x) WHERE { ?s ?p ?o }
-        # This avoids materializing all columns when we only need the row count
+        # Fast path for simple COUNT(*) queries
         if self._is_simple_count_star(query):
             return self._execute_count_star_fast(query, from_graphs)
         
-        # Try integer-based fast path for most SELECT queries
-        # This provides 6-7x speedup by doing all BGP operations on integer IDs
+        # ─── Integer-based fast path ───────────────────────────────
+        # Strategy: keep data as integer IDs as long as possible.
+        # GROUP BY, DISTINCT, ORDER BY, LIMIT all operate on integer
+        # columns. String materialization happens only on the final
+        # (usually tiny) result set.
         if self._can_use_integer_executor(query):
             try:
-                df = self._execute_where_integer(
-                    query.where,
-                    query.prefixes,
-                    as_of=query.as_of,
-                    from_graphs=from_graphs,
-                )
+                return self._execute_select_integer_path(query, from_graphs)
             except Exception:
-                # Fallback to standard executor on any error
-                df = self._execute_where(
-                    query.where, 
-                    query.prefixes, 
-                    as_of=query.as_of,
-                    from_graphs=from_graphs
-                )
-        else:
-            # Standard executor for complex queries
-            df = self._execute_where(
-                query.where, 
-                query.prefixes, 
-                as_of=query.as_of,
-                from_graphs=from_graphs
-            )
+                pass  # Fall through to standard path
         
-        # Bind provenance variables if requested (source, confidence, timestamp, process)
-        # These are special variable names that map to assertion metadata
-        provenance_var_mapping = {
-            "source": "source",
-            "confidence": "confidence", 
-            "timestamp": "timestamp",
-            "process": "process",
-        }
-        
-        for var in query.variables:
-            if isinstance(var, Variable) and var.name in provenance_var_mapping:
-                prov_col = provenance_var_mapping[var.name]
-                # Find the first pattern's provenance column
-                for col in df.columns:
-                    if col.startswith("_prov_") and col.endswith(f"_{prov_col}"):
-                        df = df.with_columns(pl.col(col).alias(var.name))
-                        break
-        
-        # Compute FunctionCall expressions in SELECT before projections
-        for v in query.variables:
-            if isinstance(v, FunctionCall) and v.alias:
-                # Evaluate the function and add as new column
-                try:
-                    expr = self._build_function_expr(v, df)
-                    if expr is not None:
-                        df = df.with_columns(expr.alias(v.alias.name))
-                except Exception:
-                    # If function evaluation fails, add null column
-                    df = df.with_columns(pl.lit(None).alias(v.alias.name))
-        
-        # Determine columns to select before DISTINCT (DISTINCT should only apply to output columns)
-        select_cols = None
-        if not query.is_select_all():
-            select_cols = []
+        # ─── Standard (string-based) path ─────────────────────────
+        df = self._execute_where(
+            query.where, query.prefixes,
+            as_of=query.as_of, from_graphs=from_graphs,
+        )
+        return self._execute_select_post(df, query)
+
+    # -----------------------------------------------------------------
+    def _execute_select_integer_path(
+        self,
+        query: SelectQuery,
+        from_graphs: Optional[list[str]],
+    ) -> pl.DataFrame:
+        """
+        Full SELECT execution on integer IDs.
+
+        String materialization is deferred until after GROUP BY, DISTINCT,
+        ORDER BY, and LIMIT so we never materialise millions of strings
+        that will be thrown away.
+        """
+        from rdf_starbase.sparql.integer_executor import IntegerExecutor, IntegerBindings
+
+        # Reuse / build the integer executor
+        if not hasattr(self.store, '_integer_executor') or self.store._integer_executor is None:
+            self.store._integer_executor = IntegerExecutor(self.store)
+        iexec = self.store._integer_executor
+
+        # Decide whether we can push LIMIT into the WHERE evaluation
+        push_limit = None
+        needs_full_set = (
+            query.order_by or query.group_by or query.has_aggregates()
+            or query.having or query.offset or query.distinct
+        )
+        if query.limit is not None and not needs_full_set:
+            push_limit = query.limit
+
+        bindings = iexec.execute_where(
+            query.where, query.prefixes,
+            as_of=query.as_of, from_graphs=from_graphs, limit=push_limit,
+        )
+        df = bindings.df  # integer-ID DataFrame
+
+        # ── Apply LIMIT early if it was already pushed ──
+        if push_limit is not None and len(df) > push_limit:
+            df = df.head(push_limit)
+
+        # Identify user-visible columns (skip _prov_ internals)
+        user_cols = [c for c in df.columns if not c.startswith("_")]
+
+        # ── GROUP BY / aggregates on integers ──────────────────────
+        has_group = query.group_by or query.has_aggregates()
+        if has_group:
+            # Determine which aggregate columns need pre-decoded numeric values
+            # (SUM, AVG, MIN, MAX on literal columns)
+            numeric_agg_cols: set[str] = set()
             for v in query.variables:
-                if isinstance(v, Variable) and v.name in df.columns:
-                    select_cols.append(v.name)
-                elif isinstance(v, AggregateExpression) and v.alias and v.alias.name in df.columns:
-                    select_cols.append(v.alias.name)
-                elif isinstance(v, FunctionCall) and v.alias and v.alias.name in df.columns:
-                    select_cols.append(v.alias.name)
-        
-        # Handle GROUP BY and aggregates
-        if query.group_by or query.has_aggregates():
+                if isinstance(v, AggregateExpression) and v.argument:
+                    if isinstance(v.argument, Variable) and v.function in ("SUM", "AVG", "MIN", "MAX"):
+                        numeric_agg_cols.add(v.argument.name)
+
+            # Pre-decode only the numeric aggregate columns
+            if numeric_agg_cols:
+                for col_name in numeric_agg_cols:
+                    if col_name in df.columns:
+                        df = self._decode_numeric_column(df, col_name, iexec)
+
+            # GROUP BY + aggregate on integer IDs (tiny result)
             df = self._apply_group_by_aggregates(df, query)
+            # After grouping, the DF is small — materialise group-key columns
+            group_cols = [v.name for v in (query.group_by or []) if v.name in df.columns]
+            if group_cols:
+                df = self._materialize_columns(df, group_cols, iexec)
         else:
-            # Apply DISTINCT if requested (non-aggregate)
-            # Must apply DISTINCT only on the projected columns, not internal _prov_* columns
+            # Compute projected columns (for DISTINCT / early projection)
+            if not query.is_select_all():
+                projected = []
+                for v in query.variables:
+                    if isinstance(v, Variable) and v.name in df.columns:
+                        projected.append(v.name)
+                    elif isinstance(v, AggregateExpression) and v.alias and v.alias.name in df.columns:
+                        projected.append(v.alias.name)
+                    elif isinstance(v, FunctionCall) and v.alias and v.alias.name in df.columns:
+                        projected.append(v.alias.name)
+                # Keep provenance columns if any provenance variables are requested
+                prov_cols = [c for c in df.columns if c.startswith("_prov_")]
+                keep_cols = projected + prov_cols if projected else None
+            else:
+                projected = user_cols
+                keep_cols = None  # keep everything
+
+            # ── Early projection on integers (before DISTINCT / ORDER BY) ──
+            # Shrinks the DF so DISTINCT and sort run on fewer columns.
+            if keep_cols and set(keep_cols) < set(df.columns):
+                # Keep needed cols only if ORDER BY columns are included
+                if query.order_by:
+                    for var, _ in query.order_by:
+                        if var.name in df.columns and var.name not in keep_cols:
+                            keep_cols.append(var.name)
+                df = df.select(keep_cols)
+
+            # ── DISTINCT on integers ──
             if query.distinct:
-                if select_cols:
-                    df = df.unique(subset=select_cols)
+                distinct_cols = projected if projected else user_cols
+                distinct_cols = [c for c in distinct_cols if c in df.columns]
+                if distinct_cols:
+                    df = df.unique(subset=distinct_cols)
                 else:
-                    # SELECT * - apply unique to all non-internal columns
-                    non_internal = [c for c in df.columns if not c.startswith("_prov_")]
-                    df = df.unique(subset=non_internal if non_internal else None)
-        
-        # Apply HAVING (filter after grouping)
+                    df = df.unique()
+
+            # ── ORDER BY on integers ──
+            if query.order_by:
+                order_cols = []
+                descending = []
+                for var, asc in query.order_by:
+                    if var.name in df.columns:
+                        order_cols.append(var.name)
+                        descending.append(not asc)
+                if order_cols:
+                    df = df.sort(order_cols, descending=descending)
+
+            # ── LIMIT / OFFSET ──
+            if query.offset:
+                df = df.slice(query.offset, query.limit or len(df))
+            elif query.limit:
+                df = df.head(query.limit)
+
+            # Now materialise only the (already sliced) result
+            cols_to_materialise = [c for c in df.columns if not c.startswith("_")]
+            df = self._materialize_columns(df, cols_to_materialise, iexec)
+
+        # ── HAVING ──
         if query.having:
             df = self._apply_filter(df, Filter(expression=query.having))
-        
-        # Apply ORDER BY
-        if query.order_by:
+
+        # ── ORDER BY (post-group, may reference aggregate aliases) ──
+        if has_group and query.order_by:
             order_cols = []
             descending = []
             for var, asc in query.order_by:
@@ -663,27 +717,44 @@ class SPARQLExecutor:
                     descending.append(not asc)
             if order_cols:
                 df = df.sort(order_cols, descending=descending)
-        
-        # Apply LIMIT and OFFSET
-        if query.offset:
-            df = df.slice(query.offset, query.limit or len(df))
-        elif query.limit:
-            df = df.head(query.limit)
-        
-        # Handle unbound SELECT variables that correspond to explicit terms in WHERE
-        # Example: SELECT ?s ?p ?o WHERE { ?s <http://example.org/worksFor> ?o }
-        # Here ?p is in SELECT but bound to explicit IRI in WHERE - fill it with that value
+            # LIMIT after ORDER BY
+            if query.offset:
+                df = df.slice(query.offset, query.limit or len(df))
+            elif query.limit:
+                df = df.head(query.limit)
+
+        # ── Bind provenance variables ──
+        provenance_var_mapping = {
+            "source": "source", "confidence": "confidence",
+            "timestamp": "timestamp", "process": "process",
+        }
+        for var in query.variables:
+            if isinstance(var, Variable) and var.name in provenance_var_mapping:
+                prov_col = provenance_var_mapping[var.name]
+                for col in df.columns:
+                    if col.startswith("_prov_") and col.endswith(f"_{prov_col}"):
+                        df = df.with_columns(pl.col(col).alias(var.name))
+                        break
+
+        # ── FunctionCall expressions ──
+        for v in query.variables:
+            if isinstance(v, FunctionCall) and v.alias:
+                try:
+                    expr = self._build_function_expr(v, df)
+                    if expr is not None:
+                        df = df.with_columns(expr.alias(v.alias.name))
+                except Exception:
+                    df = df.with_columns(pl.lit(None).alias(v.alias.name))
+
+        # ── Fill explicit-binding columns ──
         if not query.is_select_all() and len(df) > 0:
             explicit_bindings = self._extract_explicit_bindings(query.where, query.prefixes)
             for v in query.variables:
                 if isinstance(v, Variable) and v.name not in df.columns:
                     if v.name in explicit_bindings:
-                        # Add column with the explicit value
-                        df = df.with_columns(
-                            pl.lit(explicit_bindings[v.name]).alias(v.name)
-                        )
-        
-        # Select only requested variables (or all if SELECT *)
+                        df = df.with_columns(pl.lit(explicit_bindings[v.name]).alias(v.name))
+
+        # ── Project ──
         if not query.is_select_all():
             select_cols = []
             for v in query.variables:
@@ -695,7 +766,103 @@ class SPARQLExecutor:
                     select_cols.append(v.alias.name)
             if select_cols:
                 df = df.select(select_cols)
-        
+
+        return df
+
+    # -----------------------------------------------------------------
+    def _execute_select_post(
+        self,
+        df: pl.DataFrame,
+        query: SelectQuery,
+    ) -> pl.DataFrame:
+        """Post-processing for the standard (string-based) execution path."""
+        # Bind provenance variables
+        provenance_var_mapping = {
+            "source": "source", "confidence": "confidence",
+            "timestamp": "timestamp", "process": "process",
+        }
+        for var in query.variables:
+            if isinstance(var, Variable) and var.name in provenance_var_mapping:
+                prov_col = provenance_var_mapping[var.name]
+                for col in df.columns:
+                    if col.startswith("_prov_") and col.endswith(f"_{prov_col}"):
+                        df = df.with_columns(pl.col(col).alias(var.name))
+                        break
+
+        # FunctionCall expressions
+        for v in query.variables:
+            if isinstance(v, FunctionCall) and v.alias:
+                try:
+                    expr = self._build_function_expr(v, df)
+                    if expr is not None:
+                        df = df.with_columns(expr.alias(v.alias.name))
+                except Exception:
+                    df = df.with_columns(pl.lit(None).alias(v.alias.name))
+
+        # Column selection
+        select_cols = None
+        if not query.is_select_all():
+            select_cols = []
+            for v in query.variables:
+                if isinstance(v, Variable) and v.name in df.columns:
+                    select_cols.append(v.name)
+                elif isinstance(v, AggregateExpression) and v.alias and v.alias.name in df.columns:
+                    select_cols.append(v.alias.name)
+                elif isinstance(v, FunctionCall) and v.alias and v.alias.name in df.columns:
+                    select_cols.append(v.alias.name)
+
+        # GROUP BY / aggregates
+        if query.group_by or query.has_aggregates():
+            df = self._apply_group_by_aggregates(df, query)
+        else:
+            if query.distinct:
+                if select_cols:
+                    df = df.unique(subset=select_cols)
+                else:
+                    non_internal = [c for c in df.columns if not c.startswith("_prov_")]
+                    df = df.unique(subset=non_internal if non_internal else None)
+
+        # HAVING
+        if query.having:
+            df = self._apply_filter(df, Filter(expression=query.having))
+
+        # ORDER BY
+        if query.order_by:
+            order_cols, descending = [], []
+            for var, asc in query.order_by:
+                if var.name in df.columns:
+                    order_cols.append(var.name)
+                    descending.append(not asc)
+            if order_cols:
+                df = df.sort(order_cols, descending=descending)
+
+        # LIMIT / OFFSET
+        if query.offset:
+            df = df.slice(query.offset, query.limit or len(df))
+        elif query.limit:
+            df = df.head(query.limit)
+
+        # Fill explicit bindings
+        if not query.is_select_all() and len(df) > 0:
+            explicit_bindings = self._extract_explicit_bindings(query.where, query.prefixes)
+            for v in query.variables:
+                if isinstance(v, Variable) and v.name not in df.columns:
+                    if v.name in explicit_bindings:
+                        df = df.with_columns(pl.lit(explicit_bindings[v.name]).alias(v.name))
+
+        # Project
+        if not query.is_select_all():
+            select_cols = []
+            for v in query.variables:
+                if isinstance(v, Variable) and v.name in df.columns:
+                    select_cols.append(v.name)
+                elif isinstance(v, AggregateExpression) and v.alias and v.alias.name in df.columns:
+                    select_cols.append(v.alias.name)
+                elif isinstance(v, FunctionCall) and v.alias and v.alias.name in df.columns:
+                    select_cols.append(v.alias.name)
+            if select_cols:
+                df = df.select(select_cols)
+
         return df
     
     def _is_simple_count_star(self, query: SelectQuery) -> bool:
@@ -763,19 +930,21 @@ class SPARQLExecutor:
         if where.graph_patterns:
             return False
         
-        # Reject queries with BIND clauses (not supported in integer executor)
-        if where.binds:
-            return False
+        # BIND is supported by IntegerExecutor._apply_bind()
+        # (no exclusion needed)
         
         # Reject queries with subselects (not supported in integer executor)
         if where.subselects:
             return False
         
-        # Reject queries with UNION alternatives that have BINDs
+        # Check UNION alternatives for unsupported features
         for union in where.union_patterns:
             for alt in union.alternatives:
-                if isinstance(alt, dict) and alt.get('binds'):
-                    return False
+                if isinstance(alt, dict):
+                    # Check for string-requiring filters in UNION alternatives
+                    for f in alt.get('filters', []):
+                        if self._filter_needs_strings(f.expression):
+                            return False
         
         # Check for unsupported patterns
         for pattern in where.patterns:
@@ -843,13 +1012,116 @@ class SPARQLExecutor:
                             return True
         
         return False
-    
+
+    # -----------------------------------------------------------------
+    # Helper: materialise selected columns from integer IDs to strings
+    # -----------------------------------------------------------------
+    def _materialize_columns(
+        self,
+        df: pl.DataFrame,
+        columns: list[str],
+        iexec,
+    ) -> pl.DataFrame:
+        """
+        Convert integer term-ID columns to their string representations.
+
+        Only the listed *columns* are decoded; other columns are kept as-is.
+        This is used after GROUP BY / LIMIT so only a tiny number of rows
+        need decoding.
+        """
+        if df.is_empty() or not columns:
+            return df
+
+        # Collect every unique integer ID across the requested columns
+        all_ids: set[int] = set()
+        for col in columns:
+            if col in df.columns:
+                all_ids.update(df[col].drop_nulls().unique().to_list())
+
+        if not all_ids:
+            return df
+
+        # Build id → string mapping once
+        td = iexec._term_dict
+        id_to_str: dict[int, str] = {}
+        for tid in all_ids:
+            term = td.lookup(tid)
+            if term is not None:
+                id_to_str[tid] = term.lex
+
+        if not id_to_str:
+            return df
+
+        map_df = pl.DataFrame({
+            "_tid_": list(id_to_str.keys()),
+            "_str_": list(id_to_str.values()),
+        })
+
+        for col in columns:
+            if col not in df.columns:
+                continue
+            joined = (
+                df.with_columns(pl.col(col).alias("_tid_"))
+                .join(map_df, on="_tid_", how="left")
+                .with_columns(pl.col("_str_").alias(col))
+                .drop(["_tid_", "_str_"])
+            )
+            df = joined
+
+        return df
+
+    # -----------------------------------------------------------------
+    # Helper: decode a numeric aggregate column (SUM/AVG/MIN/MAX)
+    # -----------------------------------------------------------------
+    def _decode_numeric_column(
+        self,
+        df: pl.DataFrame,
+        col_name: str,
+        iexec,
+    ) -> pl.DataFrame:
+        """
+        Replace integer term-IDs in *col_name* with their float values.
+
+        This is needed before SUM/AVG/MIN/MAX aggregation — the aggregates
+        must work on the decoded numeric values, not on the arbitrary IDs.
+        """
+        if col_name not in df.columns or df.is_empty():
+            return df
+
+        td = iexec._term_dict
+        unique_ids = df[col_name].drop_nulls().unique().to_list()
+        id_to_val: dict[int, float] = {}
+        for tid in unique_ids:
+            term = td.lookup(tid)
+            if term is not None:
+                try:
+                    id_to_val[tid] = float(term.lex)
+                except (ValueError, TypeError):
+                    pass
+
+        if not id_to_val:
+            return df
+
+        map_df = pl.DataFrame({
+            "_tid_": list(id_to_val.keys()),
+            "_val_": list(id_to_val.values()),
+        })
+
+        df = (
+            df.with_columns(pl.col(col_name).alias("_tid_"))
+            .join(map_df, on="_tid_", how="left")
+            .with_columns(pl.col("_val_").alias(col_name))
+            .drop(["_tid_", "_val_"])
+        )
+        return df
+
     def _execute_where_integer(
         self,
         where: WhereClause,
         prefixes: dict[str, str],
         as_of: Optional[datetime] = None,
         from_graphs: Optional[list[str]] = None,
+        limit: Optional[int] = None,
     ) -> pl.DataFrame:
         """
         Execute WHERE clause using integer-based executor.
@@ -857,11 +1129,24 @@ class SPARQLExecutor:
         This provides 6-7x speedup by:
         1. Executing all BGP operations on integer IDs
         2. Only materializing strings at the end for output
+        
+        Args:
+            limit: If set, cap the integer bindings BEFORE string materialization.
+                   This avoids materializing millions of strings only to discard them.
         """
         from rdf_starbase.sparql.integer_executor import IntegerExecutor
         
-        executor = IntegerExecutor(self.store)
-        bindings = executor.execute_where(where, prefixes, as_of, from_graphs)
+        # Reuse cached executor to preserve IRI/literal caches across queries
+        if not hasattr(self.store, '_integer_executor') or self.store._integer_executor is None:
+            self.store._integer_executor = IntegerExecutor(self.store)
+        executor = self.store._integer_executor
+        bindings = executor.execute_where(where, prefixes, as_of, from_graphs, limit=limit)
+        
+        # Apply LIMIT before materialization to avoid converting millions
+        # of integer IDs to strings that will be thrown away.
+        if limit is not None and len(bindings) > limit:
+            from rdf_starbase.sparql.integer_executor import IntegerBindings
+            bindings = IntegerBindings(bindings.df.head(limit))
         
         # Materialize strings for output
         return executor.materialize_strings_batch(bindings)
@@ -1701,6 +1986,24 @@ class SPARQLExecutor:
                 patterns_to_execute.append((i, inner_triple, (obj_var_name, col_name, pred_var_name)))
             else:
                 patterns_to_execute.append((i, pattern, None))
+        
+        # Reorder patterns by selectivity (most selective first).
+        # Patterns with more bound terms produce fewer rows and should
+        # be executed first to keep intermediate join sizes small.
+        def _string_pattern_selectivity(item):
+            _, pat, _ = item
+            if not isinstance(pat, TriplePattern):
+                return 1.0
+            score = 1.0
+            if not isinstance(pat.subject, Variable):
+                score *= 0.001
+            if not isinstance(pat.predicate, Variable):
+                score *= 0.1
+            if not isinstance(pat.object, Variable):
+                score *= 0.01
+            return score
+        
+        patterns_to_execute.sort(key=_string_pattern_selectivity)
         
         # Execute patterns and join results
         # Check if we can parallelize independent pattern groups

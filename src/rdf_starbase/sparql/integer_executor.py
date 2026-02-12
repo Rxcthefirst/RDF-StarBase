@@ -95,13 +95,56 @@ class IntegerExecutor:
     # =========================================================================
     
     def resolve_iri(self, iri: str) -> Optional[int]:
-        """Resolve IRI string to integer ID. Returns None if not in store."""
+        """Resolve IRI string to integer ID. Returns None if not in store.
+        
+        Handles both bare IRIs (http://...) and N-Triples format (<http://...>).
+        The fact store may use either format depending on how data was ingested,
+        so we check both forms and prefer the one actually present in the facts.
+        
+        Also checks the plain-literal cache as a last resort because some
+        ingestion pipelines store object-position IRIs as literals with
+        angle-bracket lex values.
+        """
         if iri in self._iri_cache:
             return self._iri_cache[iri]
         
-        tid = self._term_dict.get_iri_id(iri)
+        # Compute both forms
+        bare = iri[1:-1] if (iri.startswith("<") and iri.endswith(">")) else iri
+        angle = iri if iri.startswith("<") else f"<{iri}>"
+        
+        # Try IRI cache / hash lookups (these return kind=IRI term IDs)
+        tid_bare = self._term_dict.get_iri_id(bare)
+        tid_angle = self._term_dict.get_iri_id(angle)
+        
+        # Prefer the IRI-kind ID that's from actual data (not synthetic 1-15)
+        iri_candidates = [t for t in (tid_bare, tid_angle) if t is not None]
+        if iri_candidates:
+            tid = max(iri_candidates)
+        else:
+            # Last resort: check plain-literal cache (object-position IRIs
+            # stored as literals with angle-bracket lex)
+            tid = self._term_dict._plain_literal_cache.get(angle)
+        
         self._iri_cache[iri] = tid
         return tid
+    
+    def resolve_iri_for_object(self, iri: str) -> Optional[int]:
+        """Resolve IRI for use in the object position.
+        
+        The object column may store IRIs as LITERAL-kind terms (with
+        angle-brackets in lex), not IRI-kind. This method returns the
+        LITERAL-kind term ID when available, falling back to IRI-kind.
+        """
+        bare = iri[1:-1] if (iri.startswith("<") and iri.endswith(">")) else iri
+        angle = iri if iri.startswith("<") else f"<{iri}>"
+        
+        # Check plain-literal cache first (object column stores these)
+        tid_lit = self._term_dict._plain_literal_cache.get(angle)
+        if tid_lit is not None:
+            return tid_lit
+        
+        # Fall back to IRI-kind (some stores may use IRI-kind in o column)
+        return self.resolve_iri(iri)
     
     def resolve_literal(self, value: str, lang: str = None, datatype: str = None) -> Optional[int]:
         """Resolve literal to integer ID. Returns None if not in store."""
@@ -120,13 +163,23 @@ class IntegerExecutor:
         self._literal_cache[key] = tid
         return tid
     
-    def resolve_term(self, term: Union[IRI, Literal, str], prefixes: Dict[str, str]) -> Optional[int]:
-        """Resolve any term to integer ID."""
+    def resolve_term(self, term: Union[IRI, Literal, str], prefixes: Dict[str, str], position: str = 's') -> Optional[int]:
+        """Resolve any term to integer ID.
+        
+        Args:
+            term: The RDF term (IRI, Literal, or string)
+            prefixes: Namespace prefix map
+            position: SPO position hint ('s', 'p', or 'o'). When 'o',
+                      uses resolve_iri_for_object to prefer LITERAL-kind
+                      IDs that match the object column encoding.
+        """
         if isinstance(term, Variable):
             return None  # Variables don't have IDs
         
         if isinstance(term, IRI):
             iri_str = self._expand_iri(term.value, prefixes)
+            if position == 'o':
+                return self.resolve_iri_for_object(iri_str)
             return self.resolve_iri(iri_str)
         
         if isinstance(term, Literal):
@@ -135,8 +188,13 @@ class IntegerExecutor:
         # String - could be IRI or literal
         if isinstance(term, str):
             if term.startswith("<") and term.endswith(">"):
-                return self.resolve_iri(term[1:-1])
+                bare = term[1:-1]
+                if position == 'o':
+                    return self.resolve_iri_for_object(bare)
+                return self.resolve_iri(bare)
             elif term.startswith("http://") or term.startswith("https://"):
+                if position == 'o':
+                    return self.resolve_iri_for_object(term)
                 return self.resolve_iri(term)
             else:
                 # Try as literal first, then as IRI
@@ -169,11 +227,14 @@ class IntegerExecutor:
         prefixes: Dict[str, str],
         as_of: datetime = None,
         from_graphs: List[str] = None,
+        pushed_bindings: Dict[str, int] = None,
+        early_limit: Optional[int] = None,
     ) -> IntegerBindings:
         """
         Execute a single triple pattern on integer storage.
         
         Returns bindings as integer IDs (not strings).
+        pushed_bindings: variable→termId constraints from FILTER pushdown.
         """
         # Resolve constant terms to IDs
         s_id = None
@@ -206,12 +267,46 @@ class IntegerExecutor:
             # RDF-Star quoted triple - handle separately
             return self._execute_quoted_object_pattern(pattern, prefixes, as_of, from_graphs)
         else:
-            o_id = self.resolve_term(pattern.object, prefixes)
+            o_id = self.resolve_term(pattern.object, prefixes, position='o')
             if o_id is None:
                 return IntegerBindings.empty()
         
+        # Apply pushed FILTER bindings as additional constraints
+        if pushed_bindings:
+            if s_var and s_var in pushed_bindings and s_id is None:
+                s_id = pushed_bindings[s_var]
+            if p_var and p_var in pushed_bindings and p_id is None:
+                p_id = pushed_bindings[p_var]
+            if o_var and o_var in pushed_bindings and o_id is None:
+                o_id = pushed_bindings[o_var]
+        
         # Build filter on integer DataFrame
-        lf = self._facts_df.lazy()
+        # Try index-accelerated path first — O(log n) vs O(N) full scan.
+        # Skip index lookup if indexes haven't been built yet — building
+        # them on-demand on 26M+ rows takes ~48s, while a direct Polars
+        # filter scan takes <0.2s.
+        fact_store = self.store._fact_store
+        indexed_df = None
+        
+        if not fact_store._indexes_stale:
+            # Indexes already built — safe to use without penalty
+            for col, tid in [("s", s_id), ("o", o_id), ("p", p_id)]:
+                if tid is not None and indexed_df is None:
+                    result = fact_store.lookup_by_index(col, tid)
+                    if result is not None:
+                        indexed_df = result
+                        if col == "s":
+                            s_id = None
+                        elif col == "o":
+                            o_id = None
+                        else:
+                            p_id = None
+                        break
+        
+        if indexed_df is not None:
+            lf = indexed_df.lazy()
+        else:
+            lf = self._facts_df.lazy()
         
         # Exclude deleted facts (DELETED flag in flags column)
         lf = lf.filter((pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)) == 0)
@@ -260,7 +355,12 @@ class IntegerExecutor:
             # No variables - just check if matches exist
             select_exprs.append(pl.lit(1).alias("_match"))
         
-        result = lf.select(select_exprs).collect()
+        # Apply early LIMIT if provided — avoids scanning/collecting entire DF
+        # when only a small result is needed (e.g. SELECT ?s ?p ?o LIMIT 100)
+        if early_limit is not None:
+            result = lf.select(select_exprs).head(early_limit).collect()
+        else:
+            result = lf.select(select_exprs).collect()
         return IntegerBindings(result)
     
     def _execute_quoted_object_pattern(
@@ -659,6 +759,46 @@ class IntegerExecutor:
         return None
     
     # =========================================================================
+    # FILTER Pushdown
+    # =========================================================================
+    
+    def _try_push_equality_filter(
+        self,
+        filter_clause: Filter,
+        prefixes: Dict[str, str],
+    ) -> Optional[Tuple[str, int]]:
+        """
+        Check if a FILTER is a simple equality that can be pushed into
+        pattern matching: FILTER(?var = <IRI>) or FILTER(?var = "literal").
+        
+        Returns (variable_name, term_id) if pushable, None otherwise.
+        """
+        expr = filter_clause.expression
+        if not isinstance(expr, Comparison):
+            return None
+        if expr.operator != ComparisonOp.EQ:
+            return None
+        
+        left, right = expr.left, expr.right
+        
+        # Identify ?var = <term> or <term> = ?var
+        var = None
+        term = None
+        if isinstance(left, Variable) and not isinstance(right, Variable):
+            var, term = left, right
+        elif isinstance(right, Variable) and not isinstance(left, Variable):
+            var, term = right, left
+        else:
+            return None
+        
+        # Resolve the constant term to an integer ID
+        tid = self.resolve_term(term, prefixes)
+        if tid is None:
+            return None
+        
+        return (var.name, tid)
+    
+    # =========================================================================
     # WHERE Clause Execution
     # =========================================================================
     
@@ -668,18 +808,84 @@ class IntegerExecutor:
         prefixes: Dict[str, str],
         as_of: datetime = None,
         from_graphs: List[str] = None,
+        limit: Optional[int] = None,
     ) -> IntegerBindings:
         """
         Execute a complete WHERE clause on integer storage.
         
         Processes patterns, OPTIONALs, UNIONs, FILTERs, MINUS - all on integers.
+        
+        Args:
+            limit: Optional row limit hint. When the query is simple enough
+                   (single pattern, no joins/filters), this is pushed into
+                   the pattern scan to avoid reading the entire dataset.
         """
+        # === FILTER PUSHDOWN ===
+        # Convert equality filters like FILTER(?var = <IRI>) into bound
+        # constraints on triple patterns, eliminating rows before joins.
+        pushed_bindings: Dict[str, int] = {}  # var_name → term_id
+        remaining_filters = []
+        
+        for f in where.filters:
+            pushed = self._try_push_equality_filter(f, prefixes)
+            if pushed:
+                var_name, term_id = pushed
+                pushed_bindings[var_name] = term_id
+            else:
+                remaining_filters.append(f)
+        
         result: Optional[IntegerBindings] = None
         
-        # Execute basic triple patterns first
-        for pattern in where.patterns:
+        # Reorder triple patterns by estimated selectivity (most selective first).
+        # Patterns with more bound terms produce fewer rows — join them first
+        # to keep intermediate result sets small.
+        # Pushed filter bindings count as bound terms for selectivity.
+        def _pattern_selectivity(pat):
+            """Lower score = more selective = execute first."""
+            if not isinstance(pat, (TriplePattern, QuotedTriplePattern)):
+                return 1.0  # non-triple patterns last
+            score = 1.0
+            s_bound = not isinstance(pat.subject, Variable) or (
+                isinstance(pat.subject, Variable) and pat.subject.name in pushed_bindings
+            )
+            p_bound = not isinstance(pat.predicate, Variable) or (
+                isinstance(pat.predicate, Variable) and pat.predicate.name in pushed_bindings
+            )
+            o_bound = not isinstance(pat.object, Variable) or (
+                isinstance(pat.object, Variable) and pat.object.name in pushed_bindings
+            )
+            if s_bound:
+                score *= 0.001
+            if p_bound:
+                score *= 0.1
+            if o_bound:
+                score *= 0.01
+            return score
+        
+        ordered_patterns = sorted(where.patterns, key=_pattern_selectivity)
+        
+        # Determine if LIMIT can be pushed into the pattern scan.
+        # Safe when: single pattern, no post-pattern operations that need full data
+        # (no UNION, OPTIONAL, MINUS, remaining FILTERs, VALUES, BINDs).
+        can_push_limit = (
+            limit is not None
+            and len(ordered_patterns) == 1
+            and not where.union_patterns
+            and not where.optional_patterns
+            and not where.minus_patterns
+            and not remaining_filters
+            and not where.binds
+            and where.values is None
+        )
+        
+        # Execute basic triple patterns (in selectivity order)
+        for pattern in ordered_patterns:
             if isinstance(pattern, (TriplePattern, QuotedTriplePattern)):
-                pattern_bindings = self.execute_pattern(pattern, prefixes, as_of, from_graphs)
+                pattern_bindings = self.execute_pattern(
+                    pattern, prefixes, as_of, from_graphs,
+                    pushed_bindings=pushed_bindings,
+                    early_limit=limit if can_push_limit else None,
+                )
                 
                 if result is None:
                     result = pattern_bindings
@@ -710,8 +916,8 @@ class IntegerExecutor:
                 minus_bindings = self._execute_minus(minus, prefixes, as_of, from_graphs)
                 result = self.anti_join(result, minus_bindings)
         
-        # Apply FILTERs
-        for filter_clause in where.filters:
+        # Apply remaining FILTERs (equality filters were already pushed into patterns)
+        for filter_clause in remaining_filters:
             if result is not None:
                 result = self.apply_filter(result, filter_clause, prefixes)
         
@@ -823,14 +1029,21 @@ class IntegerExecutor:
                 return IntegerBindings(result)
         
         if isinstance(bind.expression, Literal):
-            # BIND("value" AS ?x) - constant
-            tid = self.resolve_literal(str(bind.expression.value))
+            # BIND("value" AS ?x) - constant literal
+            # Must intern (not just look up) since the literal may not exist yet
+            lit = bind.expression
+            tid = self._term_dict.intern_literal(
+                str(lit.value),
+                datatype=lit.datatype if hasattr(lit, 'datatype') else None,
+                lang=lit.language if hasattr(lit, 'language') else None,
+            )
             result = bindings.df.with_columns(pl.lit(tid).cast(pl.Int64).alias(var_name))
             return IntegerBindings(result)
         
         if isinstance(bind.expression, IRI):
-            # BIND(<uri> AS ?x)
-            tid = self.resolve_term(bind.expression, prefixes)
+            # BIND(<uri> AS ?x) - intern the IRI
+            iri_str = self._expand_iri(bind.expression.value, prefixes)
+            tid = self._term_dict.intern_iri(iri_str)
             result = bindings.df.with_columns(pl.lit(tid).cast(pl.Int64).alias(var_name))
             return IntegerBindings(result)
         

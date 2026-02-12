@@ -196,7 +196,15 @@ class DuckDBInterface:
                 for tid, term in self._store._term_dict._id_to_term.items()
             ]
             if term_rows:
-                terms_df = pl.DataFrame(term_rows)
+                terms_df = pl.DataFrame(
+                    term_rows,
+                    schema={
+                        "term_id": pl.UInt64,
+                        "kind": pl.UInt8,
+                        "kind_name": pl.Utf8,
+                        "lex": pl.Utf8,
+                    },
+                )
                 conn.register("terms", terms_df.to_arrow())
             else:
                 terms_df = pl.DataFrame({

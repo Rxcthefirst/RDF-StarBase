@@ -24,19 +24,14 @@ async function fetchJson(endpoint, options = {}) {
 // ============================================================================
 // Repository Card - Shows actual repo status
 // ============================================================================
-function RepositoryCard({ repo, isSelected, onSelect }) {
-  const [stats, setStats] = useState(null)
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    if (repo.name) {
-      setLoading(true)
-      fetchJson(`/repositories/${repo.name}/stats`)
-        .then(setStats)
-        .catch(() => setStats(null))
-        .finally(() => setLoading(false))
-    }
-  }, [repo.name])
+function RepositoryCard({ repo, isSelected, onSelect, isLoading }) {
+  // Use inline stats from list_repositories — no extra API calls needed
+  const stats = repo.triple_count > 0 ? {
+    triple_count: repo.triple_count,
+    subject_count: repo.subject_count,
+    predicate_count: repo.predicate_count,
+  } : null
+  const loading = isLoading
 
   const reasoningLabel = {
     'none': null,
@@ -62,7 +57,7 @@ function RepositoryCard({ repo, isSelected, onSelect }) {
       </div>
       <div className="repo-stats">
         {loading ? (
-          <span className="loading-text">Loading...</span>
+          <span className="loading-text">Loading graph...</span>
         ) : stats ? (
           <>
             <div className="repo-stat">
@@ -363,6 +358,7 @@ export default function Dashboard({
   onRunQuery,
   onCreateRepo,
   onSelectRepo,
+  repoLoading = false,
   onRefreshRepos,
   onOpenImport,
   theme 
@@ -522,6 +518,7 @@ ORDER BY ?person DESC(?confidence)`,
                   repo={repo}
                   isSelected={currentRepo === repo.name}
                   onSelect={onSelectRepo}
+                  isLoading={repoLoading && currentRepo === repo.name}
                 />
               ))}
             </div>

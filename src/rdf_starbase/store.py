@@ -77,6 +77,12 @@ class TripleStore:
         self._df_cache: Optional[pl.DataFrame] = None
         self._df_cache_valid = False
         
+        # Cached stats dict (cleared on _invalidate_cache)
+        self._stats_cache: Optional[dict[str, Any]] = None
+        
+        # Cached IntegerExecutor (cleared on _invalidate_cache)
+        self._integer_executor = None
+        
         # Mapping from assertion UUID to (s_id, p_id, o_id, g_id) for deprecation
         self._assertion_map: dict[UUID, tuple[TermId, TermId, TermId, TermId]] = {}
         
@@ -116,10 +122,52 @@ class TripleStore:
         self._rdfs_subclass_id = self._term_dict.intern_iri(
             "http://www.w3.org/2000/01/rdf-schema#subClassOf"
         )
+        # RDFS comment
+        self._rdfs_comment_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2000/01/rdf-schema#comment"
+        )
+        # Domain / Range
+        self._rdfs_domain_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2000/01/rdf-schema#domain"
+        )
+        self._rdfs_range_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2000/01/rdf-schema#range"
+        )
+        # OWL / RDFS class types
+        self._owl_class_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2002/07/owl#Class"
+        )
+        self._rdfs_class_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2000/01/rdf-schema#Class"
+        )
+        # OWL / RDF property types
+        self._owl_datatype_prop_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2002/07/owl#DatatypeProperty"
+        )
+        self._owl_object_prop_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2002/07/owl#ObjectProperty"
+        )
+        self._rdf_property_id = self._term_dict.intern_iri(
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property"
+        )
+        self._rdfs_property_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2000/01/rdf-schema#Property"  
+        )
+        # SKOS altLabel
+        self._skos_altlabel_id = self._term_dict.intern_iri(
+            "http://www.w3.org/2004/02/skos/core#altLabel"
+        )
     
     def _invalidate_cache(self):
         """Invalidate the cached DataFrame view after modifications."""
         self._df_cache_valid = False
+        # Clear stats cache
+        self._stats_cache = None
+        # Mark indexes stale so they’re rebuilt lazily before next query
+        if hasattr(self, '_fact_store') and hasattr(self._fact_store, '_indexes_stale'):
+            self._fact_store._indexes_stale = True
+        # Discard cached IntegerExecutor so it rebuilds caches
+        self._integer_executor = None
     
     # ========== Transaction Support (WAL-backed durability) ==========
     
@@ -472,40 +520,46 @@ class TripleStore:
         """
         Filter facts at the integer level before materialization.
         
-        This enables filter pushdown to integer storage for better performance.
-        
-        Args:
-            s_id: Subject TermId filter (None = any)
-            p_id: Predicate TermId filter (None = any)
-            o_id: Object TermId filter (None = any)
-            g_id: Graph TermId filter (None = any)
-            include_deprecated: If True, include soft-deleted facts
-            
-        Returns:
-            LazyFrame with filtered facts (still integer-encoded)
+        Uses SPO indexes for O(log n) lookups when available, falling
+        back to Polars full scan otherwise.
         """
-        lf = self._fact_store._df.lazy()
+        fact_store = self._fact_store
         
-        # Apply filters
-        filters = []
+        # Try index-accelerated path: pick the most selective filter
+        # (prefer subject, then object, then predicate — cardinality heuristic)
+        indexed_df = None
+        remaining_filters = []
+        
+        for col, val in [("s", s_id), ("o", o_id), ("p", p_id)]:
+            if val is not None and indexed_df is None:
+                result = fact_store.lookup_by_index(col, val)
+                if result is not None:
+                    indexed_df = result
+                    continue  # already filtered
+            if val is not None:
+                remaining_filters.append((col, val))
+        
+        if indexed_df is not None:
+            lf = indexed_df.lazy()
+        else:
+            lf = fact_store._df.lazy()
+            # Apply all SPO filters as Polars scans
+            if s_id is not None:
+                remaining_filters.append(("s", s_id))
+            if o_id is not None:
+                remaining_filters.append(("o", o_id))
+            if p_id is not None:
+                remaining_filters.append(("p", p_id))
+        
+        # Apply remaining filters
+        for col, val in remaining_filters:
+            lf = lf.filter(pl.col(col) == val)
+        
+        if g_id is not None:
+            lf = lf.filter(pl.col("g") == g_id)
         
         if not include_deprecated:
-            filters.append(~(pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED) != 0))
-        
-        if s_id is not None:
-            filters.append(pl.col("s") == s_id)
-        if p_id is not None:
-            filters.append(pl.col("p") == p_id)
-        if o_id is not None:
-            filters.append(pl.col("o") == o_id)
-        if g_id is not None:
-            filters.append(pl.col("g") == g_id)
-        
-        if filters:
-            combined = filters[0]
-            for f in filters[1:]:
-                combined = combined & f
-            lf = lf.filter(combined)
+            lf = lf.filter(~(pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED) != 0))
         
         return lf
     
@@ -586,7 +640,7 @@ class TripleStore:
         )
         
         # Apply confidence filter at integer level
-        if min_confidence > 0.0:
+        if min_confidence is not None and min_confidence > 0.0:
             lf = lf.filter(pl.col("confidence") >= min_confidence)
         
         # Apply limit before materialization for efficiency
@@ -976,25 +1030,28 @@ class TripleStore:
         """
         Query triples with optional filters.
         
-        Uses the string-based _df view for compatibility with existing code.
+        Delegates to get_triples_optimized() when filters are present
+        for integer-level filter pushdown (avoids full _df materialization).
+        Falls back to the cached string-view only for unfiltered dumps.
         """
-        df = self._df.lazy()
+        has_filter = any(x is not None for x in (subject, predicate, obj, graph))
+        has_filter = has_filter or (min_confidence is not None and min_confidence > 0.0) or source is not None
         
-        if subject is not None:
-            df = df.filter(pl.col("subject") == subject)
-        if predicate is not None:
-            df = df.filter(pl.col("predicate") == predicate)
-        if obj is not None:
-            df = df.filter(pl.col("object") == str(obj))
-        if graph is not None:
-            df = df.filter(pl.col("graph") == graph)
-        if source is not None:
-            df = df.filter(pl.col("source") == source)
-        if min_confidence is not None:
-            df = df.filter(pl.col("confidence") >= min_confidence)
+        if has_filter:
+            return self.get_triples_optimized(
+                subject=subject,
+                predicate=predicate,
+                obj=obj,
+                graph=graph,
+                source=source,
+                min_confidence=min_confidence,
+                include_deprecated=include_deprecated,
+            )
+        
+        # Unfiltered: use cached string DataFrame
+        df = self._df.lazy()
         if not include_deprecated:
             df = df.filter(~pl.col("deprecated"))
-        
         return df.collect()
     
     def get_competing_claims(
@@ -1247,32 +1304,242 @@ class TripleStore:
         )
 
     def stats(self) -> dict[str, Any]:
-        """Get statistics about the triple store."""
-        fact_stats = self._fact_store.stats()
+        """Get statistics about the triple store.
+
+        Results are cached and invalidated when the store changes.
+        """
+        if self._stats_cache is not None:
+            return self._stats_cache
+
+        fact_df = self._fact_store._df
         term_stats = self._term_dict.stats()
-        
-        # Get unique subjects and predicates from actual facts (not deleted)
-        active_facts = self._fact_store._df.filter(
-            (pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)) == 0
-        )
-        unique_subjects = active_facts.select("s").unique().height
-        unique_predicates = active_facts.select("p").unique().height
-        
-        return {
-            "total_assertions": fact_stats["total_facts"],
-            "active_assertions": fact_stats["active_facts"],
-            "deprecated_assertions": fact_stats["total_facts"] - fact_stats["active_facts"],
-            "unique_sources": len(set(
-                self._term_to_string(sid) 
-                for sid in self._fact_store._df["source"].unique().to_list()
-                if sid and sid != 0
-            )),
+
+        # Single pass: compute active mask once, reuse
+        active_mask = (pl.col("flags").cast(pl.Int32) & int(FactFlags.DELETED)) == 0
+        active_facts = fact_df.filter(active_mask)
+        total_facts = len(fact_df)
+        active_count = len(active_facts)
+
+        # Metadata count (active only)
+        metadata_count = active_facts.filter(
+            (pl.col("flags").cast(pl.Int32) & int(FactFlags.METADATA)) != 0
+        ).height
+
+        # Unique counts in one lazy scan
+        unique_stats = active_facts.lazy().select([
+            pl.col("s").n_unique().alias("unique_subjects"),
+            pl.col("p").n_unique().alias("unique_predicates"),
+        ]).collect()
+        unique_subjects = unique_stats["unique_subjects"][0]
+        unique_predicates = unique_stats["unique_predicates"][0]
+
+        # Count unique sources using Polars (avoid Python loop)
+        source_col = fact_df["source"]
+        unique_sources = source_col.filter(
+            source_col.is_not_null() & (source_col != 0)
+        ).n_unique()
+
+        # Graphs count
+        graphs = fact_df.select("g").n_unique()
+
+        self._stats_cache = {
+            "total_assertions": total_facts,
+            "active_assertions": active_count,
+            "deprecated_assertions": total_facts - active_count,
+            "unique_sources": unique_sources,
             "unique_subjects": unique_subjects,
             "unique_predicates": unique_predicates,
             "term_dict": term_stats,
-            "fact_store": fact_stats,
+            "fact_store": {
+                "total_facts": total_facts,
+                "active_facts": active_count,
+                "deleted_facts": total_facts - active_count,
+                "metadata_facts": metadata_count,
+                "base_facts": active_count - metadata_count,
+                "next_txn": self._fact_store._next_txn,
+                "unique_predicates": unique_predicates,
+                "unique_subjects": unique_subjects,
+                "graphs": graphs,
+            },
         }
+        return self._stats_cache
     
+    # ------------------------------------------------------------------
+    # Fast ontology summary (integer-level, no SPARQL overhead)
+    # ------------------------------------------------------------------
+    def get_ontology_summary(self) -> dict[str, Any]:
+        """Return classes, properties and aliases entirely at the integer level.
+
+        This replaces the three heavyweight SPARQL queries previously used by
+        the ``/ontology`` endpoint.  Instead of scanning 26 M+ triples through
+        the full SPARQL pipeline we:
+
+        1. Filter the integer FactStore for ``rdf:type`` assertions whose
+           object is one of the known OWL / RDFS class or property type IRIs.
+        2. For each discovered class / property, look up label, comment,
+           domain, range, and altLabel via targeted integer filters.
+        3. Materialise **only** the small set of matched term-IDs back to
+           strings at the very end.
+
+        Returns a dict with keys ``classes``, ``properties``, ``aliases_map``.
+        """
+        deleted_mask = int(FactFlags.DELETED)
+        df = self._fact_store._df
+
+        # Active facts only
+        active = df.filter(
+            (pl.col("flags").cast(pl.Int32) & deleted_mask) == 0
+        )
+
+        # Helper: given a subject-set and a predicate id, return {subject_id: value_id}
+        def _lookup_single(subject_ids: set[int], pred_id: int) -> dict[int, int]:
+            if not subject_ids or pred_id is None:
+                return {}
+            rows = active.filter(
+                pl.col("p").eq(pred_id) & pl.col("s").is_in(list(subject_ids))
+            ).select("s", "o")
+            mapping: dict[int, int] = {}
+            for r in rows.iter_rows():
+                mapping.setdefault(r[0], r[1])  # keep first
+            return mapping
+
+        # Helper: given subject-set and pred id, return {subject_id: [value_id, ...]}
+        def _lookup_multi(subject_ids: set[int], pred_id: int) -> dict[int, list[int]]:
+            if not subject_ids or pred_id is None:
+                return {}
+            rows = active.filter(
+                pl.col("p").eq(pred_id) & pl.col("s").is_in(list(subject_ids))
+            ).select("s", "o")
+            mapping: dict[int, list[int]] = {}
+            for r in rows.iter_rows():
+                mapping.setdefault(r[0], []).append(r[1])
+            return mapping
+
+        # ── 1.  Discover class subject IDs ──────────────────────────
+        rdf_type_id = self._rdf_type_id  
+        class_type_ids = [
+            tid for tid in (self._owl_class_id, self._rdfs_class_id) if tid is not None
+        ]
+        if class_type_ids:
+            class_rows = active.filter(
+                pl.col("p").eq(rdf_type_id) & pl.col("o").is_in(class_type_ids)
+            ).select("s").unique()
+            class_ids: set[int] = set(class_rows["s"].to_list())
+        else:
+            class_ids = set()
+
+        # Filter out blank-node IDs (term string starts with "_:")
+        if class_ids:
+            class_ids = {
+                cid for cid in class_ids
+                if (s := self._term_to_string(cid)) and not s.startswith("_:")
+            }
+
+        # ── 2.  Discover property subject IDs ───────────────────────
+        prop_type_ids = [
+            tid for tid in (
+                self._owl_datatype_prop_id, self._owl_object_prop_id,
+                self._rdf_property_id, self._rdfs_property_id,
+            ) if tid is not None
+        ]
+        if prop_type_ids:
+            prop_rows = active.filter(
+                pl.col("p").eq(rdf_type_id) & pl.col("o").is_in(prop_type_ids)
+            ).select("s").unique()
+            prop_ids: set[int] = set(prop_rows["s"].to_list())
+        else:
+            prop_ids = set()
+
+        if prop_ids:
+            prop_ids = {
+                pid for pid in prop_ids
+                if (s := self._term_to_string(pid)) and not s.startswith("_:")
+            }
+
+        # ── 3.  Batch-lookup labels, comments, domain, range, altLabel
+        class_labels = _lookup_single(class_ids, self._rdfs_label_id)
+        class_comments = _lookup_single(class_ids, self._rdfs_comment_id)
+        prop_labels = _lookup_single(prop_ids, self._rdfs_label_id)
+        prop_comments = _lookup_single(prop_ids, self._rdfs_comment_id)
+        prop_domains = _lookup_single(prop_ids, self._rdfs_domain_id)
+        prop_ranges = _lookup_single(prop_ids, self._rdfs_range_id)
+
+        all_alias_subjects = class_ids | prop_ids
+        aliases_multi = _lookup_multi(all_alias_subjects, self._skos_altlabel_id)
+
+        # ── 4.  Materialise the small set of term IDs to strings ────
+        # Collect every term-ID that we need to stringify
+        all_tids: set[int] = set()
+        all_tids |= class_ids | prop_ids
+        all_tids |= set(class_labels.values()) | set(class_comments.values())
+        all_tids |= set(prop_labels.values()) | set(prop_comments.values())
+        all_tids |= set(prop_domains.values()) | set(prop_ranges.values())
+        for vs in aliases_multi.values():
+            all_tids.update(vs)
+        all_tids.discard(0)
+
+        tid_to_str: dict[int, str] = {}
+        for tid in all_tids:
+            s = self._term_to_string(tid)
+            if s is not None:
+                tid_to_str[tid] = s
+
+        def _s(tid: int | None) -> str | None:
+            if tid is None:
+                return None
+            return tid_to_str.get(tid)
+
+        def _clean_literal(val: str | None) -> str | None:
+            if not val:
+                return None
+            return val.strip('"').split('@')[0].strip('"').split('^^')[0].strip('"')
+
+        # ── 5.  Build result dicts ──────────────────────────────────
+        classes_out: list[dict] = []
+        for cid in class_ids:
+            uri = _s(cid)
+            if not uri:
+                continue
+            classes_out.append({
+                "uri": uri,
+                "label": _clean_literal(_s(class_labels.get(cid))) or None,
+                "comment": _clean_literal(_s(class_comments.get(cid))) or None,
+            })
+
+        properties_out: list[dict] = []
+        for pid in prop_ids:
+            uri = _s(pid)
+            if not uri:
+                continue
+            raw_aliases = aliases_multi.get(pid, [])
+            alias_strs = [
+                a for tid in raw_aliases if (a := _clean_literal(_s(tid)))
+            ]
+            properties_out.append({
+                "uri": uri,
+                "label": _clean_literal(_s(prop_labels.get(pid))) or None,
+                "comment": _clean_literal(_s(prop_comments.get(pid))) or None,
+                "domain": _s(prop_domains.get(pid)),
+                "range": _s(prop_ranges.get(pid)),
+                "aliases": alias_strs,
+            })
+
+        # Build aliases map keyed by full URI
+        aliases_map: dict[str, list[str]] = {}
+        for sid, tids in aliases_multi.items():
+            subj_str = _s(sid)
+            if not subj_str:
+                continue
+            cleaned = [a for tid in tids if (a := _clean_literal(_s(tid)))]
+            if cleaned:
+                aliases_map[subj_str] = cleaned
+
+        return {
+            "classes": classes_out,
+            "properties": properties_out,
+            "aliases_map": aliases_map,
+        }
+
     def __len__(self) -> int:
         """Return the number of active assertions."""
         return self._fact_store.count_active()
@@ -1499,6 +1766,10 @@ class TripleStore:
         
         ~17x faster than Python parser for standard Turtle/N-Triples.
         Uses Oxigraph only for parsing, stores data in Polars FactStore.
+        
+        Streams the file through Oxigraph without reading it entirely into
+        memory, and flushes triples in chunks to avoid accumulating hundreds
+        of millions of strings in lists.
         """
         # Map suffix to Oxigraph format
         format_map = {
@@ -1509,64 +1780,81 @@ class TripleStore:
         }
         rdf_format = format_map.get(suffix, RdfFormat.TURTLE)
         
-        # Read file content
-        if is_gzipped:
-            import gzip
-            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
-                content = f.read()
-        else:
-            content = file_path.read_text(encoding='utf-8')
-        
-        # Parse with Oxigraph (Rust speed)
         base_iri = file_path.absolute().as_uri()
         
-        subjects = []
-        predicates = []
-        objects = []
+        CHUNK_SIZE = 500_000  # Flush every 500K triples to keep memory bounded
         
-        for quad in oxigraph_parse(content, rdf_format, base_iri=base_iri):
-            # Extract subject
-            s = quad.subject
-            if hasattr(s, 'value'):
-                subj = s.value
-            else:
-                subj = f"_:{s}"
-            
-            # Extract predicate
-            pred = quad.predicate.value
-            
-            # Extract object
-            o = quad.object
-            if hasattr(o, 'value'):
-                if hasattr(o, 'datatype') and o.datatype:
-                    dt = o.datatype.value
-                    if dt != "http://www.w3.org/2001/XMLSchema#string":
-                        obj = f'"{o.value}"^^<{dt}>'
+        subjects: list[str] = []
+        predicates: list[str] = []
+        objects: list[str] = []
+        count = 0
+        
+        def _flush() -> int:
+            """Insert buffered triples and clear lists."""
+            if not subjects:
+                return 0
+            n = self.add_triples_columnar(
+                subjects=subjects,
+                predicates=predicates,
+                objects=objects,
+                source=source_uri,
+                confidence=1.0,
+                graph=graph_uri,
+            )
+            subjects.clear()
+            predicates.clear()
+            objects.clear()
+            return n
+        
+        # Stream-parse: pass a file object so Oxigraph reads incrementally
+        # instead of loading the whole file into a Python string.
+        if is_gzipped:
+            import gzip
+            fh = gzip.open(file_path, 'rb')
+        else:
+            fh = open(file_path, 'rb')
+        
+        self.begin_bulk_insert()
+        try:
+            for quad in oxigraph_parse(fh, rdf_format, base_iri=base_iri):
+                # Extract subject
+                s = quad.subject
+                if hasattr(s, 'value'):
+                    subj = s.value
+                else:
+                    subj = f"_:{s}"
+                
+                # Extract predicate
+                pred = quad.predicate.value
+                
+                # Extract object
+                o = quad.object
+                if hasattr(o, 'value'):
+                    if hasattr(o, 'datatype') and o.datatype:
+                        dt = o.datatype.value
+                        if dt != "http://www.w3.org/2001/XMLSchema#string":
+                            obj = f'"{o.value}"^^<{dt}>'
+                        else:
+                            obj = o.value
+                    elif hasattr(o, 'language') and o.language:
+                        obj = f'"{o.value}"@{o.language}'
                     else:
                         obj = o.value
-                elif hasattr(o, 'language') and o.language:
-                    obj = f'"{o.value}"@{o.language}'
                 else:
-                    obj = o.value
-            else:
-                obj = str(o)
+                    obj = str(o)
+                
+                subjects.append(subj)
+                predicates.append(pred)
+                objects.append(obj)
+                
+                if len(subjects) >= CHUNK_SIZE:
+                    count += _flush()
             
-            subjects.append(subj)
-            predicates.append(pred)
-            objects.append(obj)
-        
-        if not subjects:
-            return 0
-        
-        # Use columnar insert (Polars/Rust)
-        count = self.add_triples_columnar(
-            subjects=subjects,
-            predicates=predicates,
-            objects=objects,
-            source=source_uri,
-            confidence=1.0,
-            graph=graph_uri,
-        )
+            # Final partial chunk
+            count += _flush()
+        finally:
+            fh.close()
+            self.end_bulk_insert()
         
         return count
     
@@ -1619,25 +1907,33 @@ class TripleStore:
             stem = file_path.stem  # e.g., "file.ttl" from "file.ttl.gz"
             suffix = Path(stem).suffix.lower()  # e.g., ".ttl"
         
-        # Read file content first to check for RDF-Star syntax
+        # Check a small sample for RDF-Star syntax (<< ... >>)
+        # instead of reading the entire file into memory.
+        _SAMPLE_SIZE = 2 * 1024 * 1024  # 2 MB sample
+        if is_gzipped:
+            import gzip
+            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                sample = f.read(_SAMPLE_SIZE)
+        else:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                sample = f.read(_SAMPLE_SIZE)
+        has_rdfstar = '<<' in sample and '>>' in sample
+        
+        # Try bulk_load_file fast path for supported formats
+        if self._use_oxigraph_parsing and suffix in (".ttl", ".turtle", ".nt", ".ntriples") and not has_rdfstar:
+            try:
+                return self.bulk_load_file(file_path, graph_uri=graph_uri, source=source_uri)
+            except Exception:
+                # Fall back to Python parser if bulk load fails
+                pass
+        
+        # Python parser fallback — must read entire file into memory
         if is_gzipped:
             import gzip
             with gzip.open(file_path, 'rt', encoding='utf-8') as f:
                 file_content = f.read()
         else:
             file_content = file_path.read_text(encoding="utf-8")
-        
-        # Check for RDF-Star quoted triple syntax: << ... >>
-        # Skip Oxigraph if content contains RDF-Star, as it may not handle it correctly
-        has_rdfstar = '<<' in file_content and '>>' in file_content
-        
-        # Try Oxigraph fast path for simple formats WITHOUT RDF-Star annotations
-        if self._use_oxigraph_parsing and suffix in (".ttl", ".turtle", ".nt", ".ntriples") and not has_rdfstar:
-            try:
-                return self._load_graph_oxigraph(file_path, source_uri, graph_uri, suffix, is_gzipped)
-            except Exception:
-                # Fall back to Python parser if Oxigraph fails
-                pass
         
         try:
             
@@ -1752,4 +2048,219 @@ class TripleStore:
                 graph=graph_uri,
             )
         
+        return count
+
+    # ==========================================================================
+    # High-performance bulk file loader
+    # ==========================================================================
+
+    def bulk_load_file(
+        self,
+        file_path,
+        graph_uri: Optional[str] = None,
+        source: Optional[str] = None,
+        on_progress=None,
+    ) -> int:
+        """
+        High-performance bulk file loader targeting 300K+ triples/sec.
+
+        Optimizations over the streaming ``load_graph`` path:
+        - **No string round-trip**: Oxigraph quad objects are converted
+          directly to TermIds without formatting to strings and
+          re-parsing.
+        - **Direct cache access**: hot-path dict lookups bypass method
+          dispatch overhead.
+        - **Single metadata computation**: txn / timestamp / graph / source
+          IDs are computed once, not per-chunk.
+        - **Deferred invalidation**: ``_invalidate_cache()`` is called once
+          after all data is loaded, not per-chunk.
+        - **Large batches**: 2 M rows per DataFrame chunk (vs 500 K).
+
+        Falls back to ``load_graph`` for:
+        - RDF-Star content (``<<`` / ``>>`` syntax) so provenance
+          annotations are preserved.
+        - Unsupported formats (only ``.ttl`` / ``.nt`` handled here).
+        - Missing pyoxigraph.
+
+        Args:
+            file_path: Path to the RDF file.
+            graph_uri: Optional named graph IRI.
+            source: Provenance source label (defaults to ``file:<name>``).
+            on_progress: ``fn(triples_loaded: int)`` called every batch.
+
+        Returns:
+            Number of triples loaded.
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # --- format check ------------------------------------------------
+        suffix = file_path.suffix.lower()
+        is_gzipped = suffix == ".gz"
+        if is_gzipped:
+            suffix = Path(file_path.stem).suffix.lower()
+
+        _FORMAT_MAP = {
+            ".ttl": "TURTLE", ".turtle": "TURTLE",
+            ".nt": "N_TRIPLES", ".ntriples": "N_TRIPLES",
+        }
+        ox_fmt_name = _FORMAT_MAP.get(suffix)
+        if not ox_fmt_name:
+            return self.load_graph(str(file_path), graph_uri=graph_uri)
+
+        # --- quick RDF-Star check on 2 MB sample ------------------------
+        _SAMPLE = 2 * 1024 * 1024
+        if is_gzipped:
+            import gzip as _gz
+            with _gz.open(file_path, "rt", encoding="utf-8") as f:
+                sample = f.read(_SAMPLE)
+        else:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                sample = f.read(_SAMPLE)
+
+        if "<<" in sample and ">>" in sample:
+            # contains RDF-Star – use general path for provenance
+            return self.load_graph(str(file_path), graph_uri=graph_uri)
+
+        # --- pyoxigraph availability -------------------------------------
+        try:
+            from pyoxigraph import (
+                parse as ox_parse,
+                RdfFormat,
+                NamedNode as _NN,
+                BlankNode as _BN,
+                Literal as _LIT,
+            )
+            rdf_format = getattr(RdfFormat, ox_fmt_name)
+        except (ImportError, AttributeError):
+            return self.load_graph(str(file_path), graph_uri=graph_uri)
+
+        # --- pre-compute constants (once, not per chunk) -----------------
+        td = self._term_dict
+        fs = self._fact_store
+
+        g_id = td.intern_iri(graph_uri) if graph_uri else DEFAULT_GRAPH_ID
+        source_str = source or f"file:{file_path.name}"
+        source_id = td.intern_literal(source_str)
+        flags_int = int(FactFlags.ASSERTED)
+        txn = fs._allocate_txn()
+        t_added = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+
+        # direct cache refs – critical for the hot loop
+        iri_cache   = td._iri_cache
+        lit_cache   = td._plain_literal_cache
+        bnode_cache = td._bnode_cache
+        intern_iri     = td.intern_iri
+        intern_literal = td.intern_literal
+        intern_bnode   = td.intern_bnode
+
+        XSD_STRING = "http://www.w3.org/2001/XMLSchema#string"
+        BATCH = 2_000_000
+
+        # accumulators
+        s_ids: list = []
+        p_ids: list = []
+        o_ids: list = []
+        count = 0
+
+        # --- helpers -----------------------------------------------------
+        def _flush():
+            nonlocal count
+            n = len(s_ids)
+            if n == 0:
+                return
+            new_df = pl.DataFrame({
+                "s": pl.Series(s_ids, dtype=pl.UInt64),
+                "p": pl.Series(p_ids, dtype=pl.UInt64),
+                "o": pl.Series(o_ids, dtype=pl.UInt64),
+            }).with_columns(
+                pl.lit(g_id).cast(pl.UInt64).alias("g"),
+                pl.lit(flags_int).cast(pl.UInt16).alias("flags"),
+                pl.lit(txn).cast(pl.UInt64).alias("txn"),
+                pl.lit(t_added).cast(pl.UInt64).alias("t_added"),
+                pl.lit(source_id).cast(pl.UInt64).alias("source"),
+                pl.lit(1.0).alias("confidence"),
+                pl.lit(0).cast(pl.UInt64).alias("process"),
+            )
+            fs._batch_buffer.append(new_df)
+            count += n
+            s_ids.clear()
+            p_ids.clear()
+            o_ids.clear()
+
+        # --- stream parse ------------------------------------------------
+        if is_gzipped:
+            import gzip as _gz
+            fh = _gz.open(file_path, "rb")
+        else:
+            fh = open(file_path, "rb")
+
+        base_iri = file_path.absolute().as_uri()
+        fs.begin_batch()
+
+        try:
+            for quad in ox_parse(fh, rdf_format, base_iri=base_iri):
+                # ---- subject (NamedNode | BlankNode) ----
+                s = quad.subject
+                if type(s) is _NN:
+                    sv = s.value
+                    sid = iri_cache.get(sv)
+                    if sid is None:
+                        sid = intern_iri(sv)
+                else:
+                    sv = s.value
+                    sid = bnode_cache.get(sv)
+                    if sid is None:
+                        sid = intern_bnode(sv)
+
+                # ---- predicate (always NamedNode) ----
+                pv = quad.predicate.value
+                pid = iri_cache.get(pv)
+                if pid is None:
+                    pid = intern_iri(pv)
+
+                # ---- object (Literal | NamedNode | BlankNode) ----
+                o = quad.object
+                if type(o) is _LIT:
+                    ov = o.value
+                    lang = o.language
+                    if lang:
+                        oid = intern_literal(ov, lang=lang)
+                    else:
+                        dt = o.datatype
+                        if dt is None or dt.value == XSD_STRING:
+                            oid = lit_cache.get(ov)
+                            if oid is None:
+                                oid = intern_literal(ov)
+                        else:
+                            oid = intern_literal(ov, datatype=dt.value)
+                elif type(o) is _NN:
+                    ov = o.value
+                    oid = iri_cache.get(ov)
+                    if oid is None:
+                        oid = intern_iri(ov)
+                else:
+                    ov = o.value
+                    oid = bnode_cache.get(ov)
+                    if oid is None:
+                        oid = intern_bnode(ov)
+
+                s_ids.append(sid)
+                p_ids.append(pid)
+                o_ids.append(oid)
+
+                if len(s_ids) >= BATCH:
+                    _flush()
+                    if on_progress:
+                        on_progress(count)
+
+            _flush()  # final partial batch
+        finally:
+            fh.close()
+            fs.flush_batch()
+            self._invalidate_cache()
+
+        if on_progress:
+            on_progress(count)
         return count
