@@ -47,10 +47,12 @@ htmlcov/
 # Data
 *.parquet
 *.csv
-*.json
 data/
 *.db
 
 # OS
 .DS_Store
 Thumbs.db
+
+# UI
+src/ui/node_modules/

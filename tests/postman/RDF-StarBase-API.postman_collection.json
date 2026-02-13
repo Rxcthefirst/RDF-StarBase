@@ -1,0 +1,2231 @@
+{
+  "info": {
+    "name": "RDF-StarBase API",
+    "description": "API test suite for RDF-StarBase - a blazingly fast RDF★ database with native provenance tracking",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "rdf-starbase-api-tests"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "repoName",
+      "value": "default",
+      "type": "string",
+      "description": "Repository name for repository-scoped endpoints (AI, SQL)"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health & Info",
+      "item": [
+        {
+          "name": "Root - API Info",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has name and version', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.name).to.eql('RDF-StarBase');",
+                  "    pm.expect(json.version).to.exist;",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(500);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": ["{{baseUrl}}"],
+              "path": [""]
+            }
+          }
+        },
+        {
+          "name": "Health Check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Status is healthy', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.status).to.eql('healthy');",
+                  "});",
+                  "",
+                  "pm.test('Response time is under 100ms', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(100);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            }
+          }
+        },
+        {
+          "name": "Stats",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has store and registry stats', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.store).to.exist;",
+                  "    pm.expect(json.registry).to.exist;",
+                  "    pm.expect(json.store.total_assertions).to.be.a('number');",
+                  "    pm.expect(json.registry.total_sources).to.be.a('number');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(200);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["stats"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Triples",
+      "item": [
+        {
+          "name": "Get All Triples",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has count and triples array', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "    pm.expect(json.triples).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Triples have required fields', function () {",
+                  "    const json = pm.response.json();",
+                  "    if (json.triples.length > 0) {",
+                  "        const triple = json.triples[0];",
+                  "        pm.expect(triple.subject).to.exist;",
+                  "        pm.expect(triple.predicate).to.exist;",
+                  "        pm.expect(triple.object).to.exist;",
+                  "        pm.expect(triple.source).to.exist;",
+                  "        pm.expect(triple.confidence).to.be.a('number');",
+                  "    }",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(500);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/triples",
+              "host": ["{{baseUrl}}"],
+              "path": ["triples"]
+            }
+          }
+        },
+        {
+          "name": "Get Triples - Filter by Subject",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('All results match subject filter', function () {",
+                  "    const json = pm.response.json();",
+                  "    const subject = pm.request.url.query.get('subject');",
+                  "    json.triples.forEach(function(triple) {",
+                  "        pm.expect(triple.subject).to.eql(subject);",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/triples?subject=http://example.org/movie/inception",
+              "host": ["{{baseUrl}}"],
+              "path": ["triples"],
+              "query": [
+                {
+                  "key": "subject",
+                  "value": "http://example.org/movie/inception"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Triples - Filter by Source",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('All results match source filter', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.triples.forEach(function(triple) {",
+                  "        pm.expect(triple.source).to.eql('IMDB');",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/triples?source=IMDB",
+              "host": ["{{baseUrl}}"],
+              "path": ["triples"],
+              "query": [
+                {
+                  "key": "source",
+                  "value": "IMDB"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Triples - Filter by Confidence",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('All results meet confidence threshold', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.triples.forEach(function(triple) {",
+                  "        pm.expect(triple.confidence).to.be.at.least(0.9);",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/triples?min_confidence=0.9",
+              "host": ["{{baseUrl}}"],
+              "path": ["triples"],
+              "query": [
+                {
+                  "key": "min_confidence",
+                  "value": "0.9"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Add Triple",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response contains assertion_id', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.assertion_id).to.exist;",
+                  "    pm.expect(json.assertion_id).to.be.a('string');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject\": \"http://example.org/test/entity1\",\n  \"predicate\": \"http://schema.org/name\",\n  \"object\": \"Test Entity\",\n  \"provenance\": {\n    \"source\": \"PostmanTest\",\n    \"confidence\": 0.95,\n    \"process\": \"api_test\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/triples",
+              "host": ["{{baseUrl}}"],
+              "path": ["triples"]
+            }
+          }
+        },
+        {
+          "name": "Get Competing Claims",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has conflict detection fields', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "    pm.expect(json.has_conflicts).to.be.a('boolean');",
+                  "    pm.expect(json.claims).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/triples/http://example.org/movie/inception/claims?predicate=http://schema.org/aggregateRating",
+              "host": ["{{baseUrl}}"],
+              "path": ["triples", "http:", "", "example.org", "movie", "inception", "claims"],
+              "query": [
+                {
+                  "key": "predicate",
+                  "value": "http://schema.org/aggregateRating"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "SPARQL-Star",
+      "description": "SPARQL-Star queries with RDF-Star extensions for quoted triples and provenance filtering",
+      "item": [
+        {
+          "name": "Basic SELECT - All Triples",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response type is select', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.type).to.eql('select');",
+                  "});",
+                  "",
+                  "pm.test('Response has results and columns', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.results).to.be.an('array');",
+                  "    pm.expect(json.columns).to.be.an('array');",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(500);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql"]
+            }
+          }
+        },
+        {
+          "name": "SPARQL-Star: Quoted Triple Pattern",
+          "description": "Query using RDF-Star quoted triple syntax << s p o >> to reference statements as first-class entities",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response type is select', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.type).to.eql('select');",
+                  "});",
+                  "",
+                  "pm.test('Parsed quoted triple successfully', function () {",
+                  "    // Query should parse and execute (even if no results)",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(500);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"SELECT ?asserter WHERE { << <http://example.org/movie/inception> <http://schema.org/name> \\\"Inception\\\" >> <http://example.org/assertedBy> ?asserter }\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql"]
+            }
+          }
+        },
+        {
+          "name": "SPARQL-Star: FILTER_SOURCE Provenance",
+          "description": "RDF-StarBase extension to filter results by data source provenance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response type is select', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.type).to.eql('select');",
+                  "});",
+                  "",
+                  "pm.test('Query executed with provenance filter', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(500);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"SELECT ?movie ?title WHERE { ?movie <http://schema.org/name> ?title . FILTER_SOURCE(?source = \\\"IMDB\\\") }\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql"]
+            }
+          }
+        },
+        {
+          "name": "SPARQL-Star: FILTER_CONFIDENCE Threshold",
+          "description": "RDF-StarBase extension to filter results by confidence score threshold",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response type is select', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.type).to.eql('select');",
+                  "});",
+                  "",
+                  "pm.test('Query executed with confidence filter', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(500);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"SELECT ?s ?rating WHERE { ?s <http://schema.org/aggregateRating> ?rating . FILTER_CONFIDENCE(?conf >= 0.9) }\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql"]
+            }
+          }
+        },
+        {
+          "name": "SPARQL-Star: Parse Quoted Triple AST",
+          "description": "Parse a SPARQL-Star query with quoted triples and return the AST",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Query is valid SPARQL-Star', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.valid).to.be.true;",
+                  "});",
+                  "",
+                  "pm.test('AST contains quoted triple pattern', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.ast).to.exist;",
+                  "    // The AST should reflect the quoted triple structure",
+                  "    const astStr = JSON.stringify(json.ast);",
+                  "    pm.expect(astStr).to.include('QuotedTriplePattern');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(200);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"SELECT ?who WHERE { << <http://example.org/s> <http://example.org/p> <http://example.org/o> >> <http://example.org/assertedBy> ?who }\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql/parse",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql", "parse"]
+            }
+          }
+        },
+        {
+          "name": "ASK Query - Entity Exists",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response type is ask', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.type).to.eql('ask');",
+                  "});",
+                  "",
+                  "pm.test('Result is true', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.result).to.be.true;",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"ASK WHERE { ?s <http://schema.org/name> \\\"Inception\\\" }\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql"]
+            }
+          }
+        },
+        {
+          "name": "ASK Query - Entity Does Not Exist",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response type is ask', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.type).to.eql('ask');",
+                  "});",
+                  "",
+                  "pm.test('Result is false', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.result).to.be.false;",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"ASK WHERE { ?s <http://schema.org/name> \\\"NonExistentMovie\\\" }\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql"]
+            }
+          }
+        },
+        {
+          "name": "Invalid SPARQL Query",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 400', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "",
+                  "pm.test('Response contains error detail', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.detail).to.exist;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"NOT VALID SPARQL QUERY\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Registry",
+      "item": [
+        {
+          "name": "Get All Sources",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has count and sources array', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "    pm.expect(json.sources).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Sources have required fields', function () {",
+                  "    const json = pm.response.json();",
+                  "    if (json.sources.length > 0) {",
+                  "        const source = json.sources[0];",
+                  "        pm.expect(source.id).to.exist;",
+                  "        pm.expect(source.name).to.exist;",
+                  "        pm.expect(source.source_type).to.exist;",
+                  "        pm.expect(source.status).to.exist;",
+                  "    }",
+                  "});",
+                  "",
+                  "// Save first source ID for later tests",
+                  "const json = pm.response.json();",
+                  "if (json.sources.length > 0) {",
+                  "    pm.collectionVariables.set('sourceId', json.sources[0].id);",
+                  "}",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sources",
+              "host": ["{{baseUrl}}"],
+              "path": ["sources"]
+            }
+          }
+        },
+        {
+          "name": "Get Sources - Filter by Type",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('All results match type filter', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.sources.forEach(function(source) {",
+                  "        pm.expect(source.source_type).to.eql('api');",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sources?source_type=api",
+              "host": ["{{baseUrl}}"],
+              "path": ["sources"],
+              "query": [
+                {
+                  "key": "source_type",
+                  "value": "api"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Sources - Filter by Tag",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('All results have requested tag', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.sources.forEach(function(source) {",
+                  "        pm.expect(source.tags).to.include('movies');",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sources?tag=movies",
+              "host": ["{{baseUrl}}"],
+              "path": ["sources"],
+              "query": [
+                {
+                  "key": "tag",
+                  "value": "movies"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Register New Source",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response contains source ID', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.id).to.exist;",
+                  "    pm.expect(json.name).to.eql('TestSource');",
+                  "    pm.expect(json.source_type).to.eql('api');",
+                  "});",
+                  "",
+                  "// Save new source ID",
+                  "pm.collectionVariables.set('newSourceId', pm.response.json().id);",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"TestSource\",\n  \"source_type\": \"api\",\n  \"uri\": \"https://test.api.example.com\",\n  \"description\": \"Test data source for Postman tests\",\n  \"owner\": \"test-team\",\n  \"tags\": [\"test\", \"automation\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sources",
+              "host": ["{{baseUrl}}"],
+              "path": ["sources"]
+            }
+          }
+        },
+        {
+          "name": "Get Source by ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response contains source details', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.id).to.exist;",
+                  "    pm.expect(json.name).to.exist;",
+                  "    pm.expect(json.source_type).to.exist;",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sources/{{sourceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["sources", "{{sourceId}}"]
+            }
+          }
+        },
+        {
+          "name": "Get Source - Not Found",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 404', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "",
+                  "pm.test('Response contains error detail', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.detail).to.exist;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sources/00000000-0000-0000-0000-000000000000",
+              "host": ["{{baseUrl}}"],
+              "path": ["sources", "00000000-0000-0000-0000-000000000000"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Graph Visualization",
+      "item": [
+        {
+          "name": "Get Graph Nodes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has count and nodes array', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "    pm.expect(json.nodes).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Nodes have id and label', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.nodes.forEach(function(node) {",
+                  "        pm.expect(node.id).to.exist;",
+                  "        pm.expect(node.label).to.exist;",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/graph/nodes?limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["graph", "nodes"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Graph Edges",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has count and edges array', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.count).to.be.a('number');",
+                  "    pm.expect(json.edges).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Edges have source, target, predicate', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.edges.forEach(function(edge) {",
+                  "        pm.expect(edge.source).to.exist;",
+                  "        pm.expect(edge.target).to.exist;",
+                  "        pm.expect(edge.predicate).to.exist;",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/graph/edges?limit=200",
+              "host": ["{{baseUrl}}"],
+              "path": ["graph", "edges"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "200"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Subgraph",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has center, nodes, and edges', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.center).to.exist;",
+                  "    pm.expect(json.nodes).to.be.an('array');",
+                  "    pm.expect(json.edges).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Center matches requested node', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.center).to.eql('http://example.org/movie/inception');",
+                  "});",
+                  "",
+                  "pm.test('Response time is acceptable', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(300);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/graph/subgraph/http://example.org/movie/inception",
+              "host": ["{{baseUrl}}"],
+              "path": ["graph", "subgraph", "http:", "", "example.org", "movie", "inception"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Performance Tests",
+      "item": [
+        {
+          "name": "Bulk Query - Large Result Set",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response time under 1 second', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(1000);",
+                  "});",
+                  "",
+                  "pm.test('Response size is reasonable', function () {",
+                  "    pm.expect(pm.response.responseSize).to.be.below(1000000); // 1MB",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/triples?limit=1000",
+              "host": ["{{baseUrl}}"],
+              "path": ["triples"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "1000"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "SPARQL Performance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Query executes under 500ms', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(500);",
+                  "});",
+                  "",
+                  "// Log performance metrics",
+                  "console.log('SPARQL query time: ' + pm.response.responseTime + 'ms');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sparql",
+              "host": ["{{baseUrl}}"],
+              "path": ["sparql"]
+            }
+          }
+        },
+        {
+          "name": "Concurrent Health Checks",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response time under 50ms', function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(50);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "AI Grounding",
+      "description": "AI Grounding API endpoints for LLM/RAG consumption. Uses repository-scoped paths.",
+      "item": [
+        {
+          "name": "AI Health Check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Status is healthy', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.status).to.eql('healthy');",
+                  "    pm.expect(json.api).to.eql('ai_grounding');",
+                  "});",
+                  "",
+                  "pm.test('Has required capabilities', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.capabilities).to.include('query');",
+                  "    pm.expect(json.capabilities).to.include('verify');",
+                  "    pm.expect(json.capabilities).to.include('context');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "health"]
+            }
+          }
+        },
+        {
+          "name": "AI Query - All Facts",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has required fields', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('facts');",
+                  "    pm.expect(json).to.have.property('total_count');",
+                  "    pm.expect(json).to.have.property('confidence_threshold');",
+                  "    pm.expect(json).to.have.property('retrieval_timestamp');",
+                  "});",
+                  "",
+                  "pm.test('Facts have citation structure', function () {",
+                  "    const json = pm.response.json();",
+                  "    if (json.facts.length > 0) {",
+                  "        const fact = json.facts[0];",
+                  "        pm.expect(fact).to.have.property('subject');",
+                  "        pm.expect(fact).to.have.property('predicate');",
+                  "        pm.expect(fact).to.have.property('object');",
+                  "        pm.expect(fact).to.have.property('citation');",
+                  "        pm.expect(fact.citation).to.have.property('fact_hash');",
+                  "        pm.expect(fact.citation).to.have.property('source');",
+                  "        pm.expect(fact.citation).to.have.property('confidence');",
+                  "    }",
+                  "});",
+                  "",
+                  "// Log timing for performance analysis",
+                  "console.log('AI Query time: ' + pm.response.responseTime + 'ms');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "query"]
+            }
+          }
+        },
+        {
+          "name": "AI Query - High Confidence Filter",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Confidence threshold is 0.9', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.confidence_threshold).to.eql(0.9);",
+                  "});",
+                  "",
+                  "pm.test('All facts meet confidence threshold', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.facts.forEach(fact => {",
+                  "        pm.expect(fact.citation.confidence).to.be.at.least(0.9);",
+                  "    });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"min_confidence\": \"high\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "query"]
+            }
+          }
+        },
+        {
+          "name": "AI Query - By Subject",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('All facts have matching subject', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.facts.forEach(fact => {",
+                  "        pm.expect(fact.subject).to.eql('http://example.org/test/entity1');",
+                  "    });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject\": \"http://example.org/test/entity1\",\n  \"min_confidence\": \"any\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "query"]
+            }
+          }
+        },
+        {
+          "name": "AI Query - Source Filter",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('All facts from specified source', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.facts.forEach(fact => {",
+                  "        pm.expect(fact.citation.source).to.eql('PostmanTest');",
+                  "    });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sources\": [\"PostmanTest\"],\n  \"min_confidence\": \"any\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "query"]
+            }
+          }
+        },
+        {
+          "name": "AI Verify - Supported Claim",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has verification fields', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('claim_supported');",
+                  "    pm.expect(json).to.have.property('recommendation');",
+                  "    pm.expect(json).to.have.property('supporting_facts');",
+                  "    pm.expect(json).to.have.property('contradicting_facts');",
+                  "    pm.expect(json).to.have.property('has_conflicts');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject\": \"http://example.org/test/entity1\",\n  \"predicate\": \"http://schema.org/name\",\n  \"expected_object\": \"Test Entity\",\n  \"min_confidence\": \"any\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/verify",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "verify"]
+            }
+          }
+        },
+        {
+          "name": "AI Verify - Unknown Subject",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Claim not supported for unknown subject', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.claim_supported).to.eql(false);",
+                  "});",
+                  "",
+                  "pm.test('Recommendation provided', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.recommendation).to.be.a('string');",
+                  "    pm.expect(json.recommendation.length).to.be.above(10);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject\": \"http://example.org/unknown/entity\",\n  \"predicate\": \"http://schema.org/name\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/verify",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "verify"]
+            }
+          }
+        },
+        {
+          "name": "AI Context - Get Entity Context",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has context fields', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('entity');",
+                  "    pm.expect(json).to.have.property('facts');",
+                  "    pm.expect(json).to.have.property('related_entities');",
+                  "    pm.expect(json).to.have.property('sources');",
+                  "    pm.expect(json).to.have.property('confidence_summary');",
+                  "});",
+                  "",
+                  "pm.test('Confidence summary has statistics', function () {",
+                  "    const json = pm.response.json();",
+                  "    const summary = json.confidence_summary;",
+                  "    pm.expect(summary).to.have.property('min');",
+                  "    pm.expect(summary).to.have.property('max');",
+                  "    pm.expect(summary).to.have.property('avg');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/context/http://example.org/test/entity1",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "context", "http:", "", "example.org", "test", "entity1"]
+            }
+          }
+        },
+        {
+          "name": "AI Context - With Confidence Filter",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('All facts meet confidence threshold', function () {",
+                  "    const json = pm.response.json();",
+                  "    json.facts.forEach(fact => {",
+                  "        pm.expect(fact.citation.confidence).to.be.at.least(0.9);",
+                  "    });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/context/http://example.org/test/entity1?min_confidence=high",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "context", "http:", "", "example.org", "test", "entity1"],
+              "query": [
+                {
+                  "key": "min_confidence",
+                  "value": "high"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "AI Materialize - Run Reasoning",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 or 500/501', function () {",
+                  "    // May fail if store doesn't support reasoning",
+                  "    pm.expect([200, 500, 501]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "    pm.test('Response has materialization fields', function () {",
+                  "        const json = pm.response.json();",
+                  "        pm.expect(json).to.have.property('success');",
+                  "        pm.expect(json).to.have.property('iterations');",
+                  "        pm.expect(json).to.have.property('triples_inferred');",
+                  "    });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"enable_rdfs\": true,\n  \"enable_owl\": true,\n  \"max_iterations\": 50\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/materialize",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "materialize"]
+            }
+          }
+        },
+        {
+          "name": "AI Inferences - List Inferred Triples",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has inference fields', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('count');",
+                  "    pm.expect(json).to.have.property('inferences');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/inferences?limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "inferences"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "AI Grounding Workflow - RAG Pipeline",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// This simulates a RAG workflow where we query, then verify"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Got facts for grounding', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.facts).to.be.an('array');",
+                  "});",
+                  "",
+                  "// Store a fact for the next verification request",
+                  "const json = pm.response.json();",
+                  "if (json.facts.length > 0) {",
+                  "    pm.collectionVariables.set('lastFact', JSON.stringify(json.facts[0]));",
+                  "}",
+                  "",
+                  "// Log performance for monitoring",
+                  "console.log('RAG Query time: ' + pm.response.responseTime + 'ms, Facts returned: ' + json.facts.length);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"min_confidence\": \"medium\",\n  \"limit\": 10\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/ai/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "ai", "query"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "SQL Interface",
+      "description": "DuckDB SQL interface for querying the triplestore with SQL. Uses repository-scoped paths.",
+      "item": [
+        {
+          "name": "List Tables",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response is an array of tables', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Core tables exist', function () {",
+                  "    const json = pm.response.json();",
+                  "    const tableNames = json.map(t => t.name);",
+                  "    pm.expect(tableNames).to.include('triples');",
+                  "});",
+                  "",
+                  "pm.test('Tables have column info', function () {",
+                  "    const json = pm.response.json();",
+                  "    if (json.length > 0) {",
+                  "        pm.expect(json[0]).to.have.property('name');",
+                  "        pm.expect(json[0]).to.have.property('columns');",
+                  "        pm.expect(json[0]).to.have.property('row_count');",
+                  "    }",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/sql/tables",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "sql", "tables"]
+            }
+          }
+        },
+        {
+          "name": "Get Table Schema",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has table and columns', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('table');",
+                  "    pm.expect(json).to.have.property('columns');",
+                  "    pm.expect(json.table).to.eql('triples');",
+                  "});",
+                  "",
+                  "pm.test('Triples table has expected columns', function () {",
+                  "    const json = pm.response.json();",
+                  "    const colNames = Object.keys(json.columns);",
+                  "    pm.expect(colNames).to.include('subject');",
+                  "    pm.expect(colNames).to.include('predicate');",
+                  "    pm.expect(colNames).to.include('object');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/sql/schema/triples",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "sql", "schema", "triples"]
+            }
+          }
+        },
+        {
+          "name": "Sample Table Data",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has data', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('columns');",
+                  "    pm.expect(json).to.have.property('data');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/sql/sample/triples?n=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "sql", "sample", "triples"],
+              "query": [
+                {
+                  "key": "n",
+                  "value": "10"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Execute SQL - Basic Query",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has columns and data', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('columns');",
+                  "    pm.expect(json).to.have.property('data');",
+                  "});",
+                  "",
+                  "pm.test('Query executed successfully', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.columns).to.include('subject');",
+                  "    pm.expect(json.columns).to.include('predicate');",
+                  "    pm.expect(json.columns).to.include('object');",
+                  "});",
+                  "",
+                  "// Log timing for performance analysis",
+                  "console.log('SQL Query time: ' + pm.response.responseTime + 'ms');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELECT subject, predicate, object FROM triples LIMIT 10\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/sql/execute",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "sql", "execute"]
+            }
+          }
+        },
+        {
+          "name": "Execute SQL - Count by Predicate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Aggregation query worked', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.columns).to.include('predicate');",
+                  "    pm.expect(json.columns).to.include('count');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELECT predicate, COUNT(*) as count FROM triples GROUP BY predicate ORDER BY count DESC\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/sql/execute",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "sql", "execute"]
+            }
+          }
+        },
+        {
+          "name": "Execute SQL - Claims by Source",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Source analysis query worked', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.columns).to.include('source');",
+                  "    pm.expect(json.columns).to.include('claim_count');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELECT source, COUNT(*) as claim_count, AVG(confidence) as avg_confidence FROM triples WHERE source IS NOT NULL GROUP BY source ORDER BY claim_count DESC\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/sql/execute",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "sql", "execute"]
+            }
+          }
+        },
+        {
+          "name": "Get Query Helpers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has query templates', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('description');",
+                  "    pm.expect(json).to.have.property('queries');",
+                  "    pm.expect(json.queries).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Query templates have required fields', function () {",
+                  "    const json = pm.response.json();",
+                  "    if (json.queries.length > 0) {",
+                  "        const query = json.queries[0];",
+                  "        pm.expect(query).to.have.property('name');",
+                  "        pm.expect(query).to.have.property('description');",
+                  "        pm.expect(query).to.have.property('sql');",
+                  "        pm.expect(query).to.have.property('category');",
+                  "    }",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/sql/helpers",
+              "host": ["{{baseUrl}}"],
+              "path": ["sql", "helpers"]
+            }
+          }
+        },
+        {
+          "name": "Execute SQL - Invalid Query",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 400 or 500', function () {",
+                  "    pm.expect([400, 500]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "pm.test('Error detail provided', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('detail');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELEKT * FORM triples\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/sql/execute",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "sql", "execute"]
+            }
+          }
+        },
+        {
+          "name": "Refresh Tables",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Refresh successful', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('message');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/repositories/{{repoName}}/sql/refresh",
+              "host": ["{{baseUrl}}"],
+              "path": ["repositories", "{{repoName}}", "sql", "refresh"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

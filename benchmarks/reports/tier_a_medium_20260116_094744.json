@@ -1,0 +1,109 @@
+{
+  "engine": "RDF-StarBase",
+  "version": "0.1.0",
+  "timestamp": "2026-01-16T17:47:44.771470+00:00",
+  "tier": "A",
+  "scale": "medium",
+  "environment": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python_version": "3.12.9",
+    "cpu_model": "AMD64 Family 23 Model 113 Stepping 0, AuthenticAMD",
+    "cpu_count_physical": 6,
+    "cpu_count_logical": 12,
+    "ram_total_gb": 63.9,
+    "polars_version": "1.35.2",
+    "polars_threads": 12
+  },
+  "config": {
+    "entities": 100000,
+    "facts": 1000000,
+    "metadata_rate": 0.3
+  },
+  "ingestion": {
+    "base_facts": 1000000,
+    "metadata_facts": 899525,
+    "quoted_triples": 299779,
+    "total_terms": 288888,
+    "elapsed_seconds": 1375.196394699975,
+    "facts_per_second": 727.1688639193742,
+    "meta_per_second": 654.106572317075,
+    "peak_memory_mb": 420.109375
+  },
+  "queries": [
+    {
+      "name": "Q1_spo_exact",
+      "cold_p50_ms": 6.228600017493591,
+      "cold_p95_ms": 6.41979998908937,
+      "warm_p50_ms": 5.952549996436574,
+      "warm_p95_ms": 7.301500008907169,
+      "result_count": 12280
+    },
+    {
+      "name": "Q4_predicate_fanout",
+      "cold_p50_ms": 9.714500018162653,
+      "cold_p95_ms": 10.015299980295822,
+      "warm_p50_ms": 9.286150001571514,
+      "warm_p95_ms": 10.802100005093962,
+      "result_count": 143272
+    },
+    {
+      "name": "Q6_qt_metadata",
+      "cold_p50_ms": 7.914499990874901,
+      "cold_p95_ms": 8.392799994908273,
+      "warm_p50_ms": 7.514150012866594,
+      "warm_p95_ms": 8.305299998028204,
+      "result_count": 631
+    },
+    {
+      "name": "Q7_expand_by_source",
+      "cold_p50_ms": 40.89559998828918,
+      "cold_p95_ms": 41.9044999871403,
+      "warm_p50_ms": 39.22720000264235,
+      "warm_p95_ms": 44.43179999361746,
+      "result_count": 4845
+    },
+    {
+      "name": "Q9_confidence_filter",
+      "cold_p50_ms": 108479.01670000283,
+      "cold_p95_ms": 111427.87509999471,
+      "warm_p50_ms": 106950.6446000014,
+      "warm_p95_ms": 111158.27710001031,
+      "result_count": 11190103
+    },
+    {
+      "name": "Q11_count_by_source",
+      "cold_p50_ms": 24.251599999843165,
+      "cold_p95_ms": 34.10679998341948,
+      "warm_p50_ms": 21.768150007119402,
+      "warm_p95_ms": 22.29059999808669,
+      "result_count": 100
+    },
+    {
+      "name": "Q12_count_by_run",
+      "cold_p50_ms": 21.57650000299327,
+      "cold_p95_ms": 23.223199998028576,
+      "warm_p50_ms": 20.65295001375489,
+      "warm_p95_ms": 21.59430002211593,
+      "result_count": 50
+    }
+  ],
+  "storage_stats": {
+    "term_dict": {
+      "total_terms": 288888,
+      "by_kind": {
+        "IRI": 64637,
+        "LITERAL": 224251,
+        "BNODE": 0,
+        "QUOTED_TRIPLE": 170591
+      },
+      "hash_collisions": 0
+    },
+    "qt_dict": {
+      "count": 170591,
+      "collisions": 0
+    },
+    "fact_store": {
+      "count": 1899525
+    }
+  }
+}

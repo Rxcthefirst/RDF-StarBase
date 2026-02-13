@@ -1,0 +1,78 @@
+{
+  "timestamp": "2026-01-16T18:57:04.619440+00:00",
+  "tier": "A",
+  "scale": "large",
+  "environment": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python_version": "3.12.9",
+    "cpu_model": "AMD64 Family 23 Model 113 Stepping 0, AuthenticAMD",
+    "cpu_count": 12,
+    "ram_total_gb": 63.9,
+    "polars_version": "1.35.2",
+    "polars_threads": 12
+  },
+  "config": {
+    "entities": 500000,
+    "facts": 10000000
+  },
+  "ingestion": {
+    "base_facts": 10000000,
+    "metadata_facts": 8996820,
+    "quoted_triples": 2998768,
+    "total_terms": 2672073,
+    "elapsed_seconds": 186.83539459999884,
+    "peak_memory_mb": 2994.8828125,
+    "facts_per_second": 53523.04910645695,
+    "total_per_second": 101676.77297265235
+  },
+  "queries": [
+    {
+      "name": "Q1_spo_exact",
+      "cold_p50_ms": 20.62,
+      "cold_p95_ms": 21.94,
+      "warm_p50_ms": 20.89,
+      "warm_p95_ms": 23.14,
+      "result_count": 119012
+    },
+    {
+      "name": "Q4_pred_fanout",
+      "cold_p50_ms": 48.2,
+      "cold_p95_ms": 48.61,
+      "warm_p50_ms": 47.26,
+      "warm_p95_ms": 49.74,
+      "result_count": 1431011
+    },
+    {
+      "name": "Q6_qt_metadata",
+      "cold_p50_ms": 33.49,
+      "cold_p95_ms": 33.6,
+      "warm_p50_ms": 31.2,
+      "warm_p95_ms": 33.49,
+      "result_count": 5805
+    },
+    {
+      "name": "Q7_by_source",
+      "cold_p50_ms": 1088.9,
+      "cold_p95_ms": 1092.04,
+      "warm_p50_ms": 1094.77,
+      "warm_p95_ms": 1121.61,
+      "result_count": 261711
+    },
+    {
+      "name": "Q11_count_source",
+      "cold_p50_ms": 147.24,
+      "cold_p95_ms": 150.56,
+      "warm_p50_ms": 145.0,
+      "warm_p95_ms": 148.7,
+      "result_count": 100
+    },
+    {
+      "name": "Q12_count_run",
+      "cold_p50_ms": 139.36,
+      "cold_p95_ms": 143.17,
+      "warm_p50_ms": 144.06,
+      "warm_p95_ms": 155.49,
+      "result_count": 50
+    }
+  ]
+}

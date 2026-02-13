@@ -1,0 +1,172 @@
+[
+  {
+    "tier": "T1: Entity Profile",
+    "name": "Relationship record profile",
+    "rows": 5,
+    "p50_ms": 25.49,
+    "p95_ms": 27.35,
+    "p99_ms": 27.35,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T1: Entity Profile",
+    "name": "DirectConsolidation profile",
+    "rows": 5,
+    "p50_ms": 24.91,
+    "p95_ms": 26.04,
+    "p99_ms": 26.04,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T2: Name Search",
+    "name": "BIC tag prefix search 'AAAA'",
+    "rows": 0,
+    "p50_ms": 0.42,
+    "p95_ms": 0.59,
+    "p99_ms": 0.59,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T2: Name Search",
+    "name": "Relationship status search",
+    "rows": 100,
+    "p50_ms": 31.68,
+    "p95_ms": 36.42,
+    "p99_ms": 36.42,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T3: Direct Parent",
+    "name": "Child \u2192 parent lookup",
+    "rows": 100,
+    "p50_ms": 74.52,
+    "p95_ms": 79.89,
+    "p99_ms": 79.89,
+    "medal": "Silver",
+    "runs": 20
+  },
+  {
+    "tier": "T3: Direct Parent",
+    "name": "Specific child \u2192 parent",
+    "rows": 2,
+    "p50_ms": 64.07,
+    "p95_ms": 65.24,
+    "p99_ms": 65.24,
+    "medal": "Silver",
+    "runs": 20
+  },
+  {
+    "tier": "T4: Parent Chain",
+    "name": "Child \u2192 direct + ultimate parent chain",
+    "rows": 1,
+    "p50_ms": 200.32,
+    "p95_ms": 222.94,
+    "p99_ms": 222.94,
+    "medal": "Silver",
+    "runs": 20
+  },
+  {
+    "tier": "T4: Parent Chain",
+    "name": "Direct + ultimate parent join (sample 50)",
+    "rows": 50,
+    "p50_ms": 223.02,
+    "p95_ms": 242.71,
+    "p99_ms": 242.71,
+    "medal": "Silver",
+    "runs": 20
+  },
+  {
+    "tier": "T5: Portfolio View",
+    "name": "Portfolio batch (25 entities)",
+    "rows": 0,
+    "p50_ms": 97.05,
+    "p95_ms": 107.35,
+    "p99_ms": 107.35,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T5: Portfolio View",
+    "name": "Portfolio with status (25 entities)",
+    "rows": 0,
+    "p50_ms": 111.84,
+    "p95_ms": 118.42,
+    "p99_ms": 118.42,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T6: Risk Aggregation",
+    "name": "Count relationships by type",
+    "rows": 15,
+    "p50_ms": 112.99,
+    "p95_ms": 129.81,
+    "p99_ms": 129.81,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T6: Risk Aggregation",
+    "name": "Count by relationship status",
+    "rows": 3,
+    "p50_ms": 35.15,
+    "p95_ms": 36.56,
+    "p99_ms": 36.56,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T6: Risk Aggregation",
+    "name": "Count by validation source",
+    "rows": 3,
+    "p50_ms": 34.9,
+    "p95_ms": 37.46,
+    "p99_ms": 37.46,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T6: Risk Aggregation",
+    "name": "Count by managing LOU",
+    "rows": 41,
+    "p50_ms": 35.52,
+    "p95_ms": 47.67,
+    "p99_ms": 47.67,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T7: Provenance",
+    "name": "Registration dates (LIMIT 100)",
+    "rows": 100,
+    "p50_ms": 74.04,
+    "p95_ms": 81.0,
+    "p99_ms": 81.0,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T7: Provenance",
+    "name": "Validation documents for records",
+    "rows": 100,
+    "p50_ms": 31.23,
+    "p95_ms": 33.03,
+    "p99_ms": 33.03,
+    "medal": "Gold",
+    "runs": 20
+  },
+  {
+    "tier": "T7: Provenance",
+    "name": "Single record provenance",
+    "rows": 5,
+    "p50_ms": 25.5,
+    "p95_ms": 26.87,
+    "p99_ms": 26.87,
+    "medal": "Gold",
+    "runs": 20
+  }
+]
