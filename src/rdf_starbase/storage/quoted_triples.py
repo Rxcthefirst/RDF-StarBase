@@ -159,18 +159,21 @@ class QtDict:
         This is the storage primitive for RDF★ expansion joins
         (storage-spec.md §8: lookup_qt).
         """
-        rows = []
+        # Vectorized approach: build column lists directly to avoid dict append overhead
+        qt_id_list = []
+        s_list = []
+        p_list = []
+        o_list = []
+        
         for qt_id in qt_ids:
             qt = self._id_to_qt.get(qt_id)
             if qt is not None:
-                rows.append({
-                    "qt_id": qt_id,
-                    "s": qt.s,
-                    "p": qt.p,
-                    "o": qt.o,
-                })
+                qt_id_list.append(qt_id)
+                s_list.append(qt.s)
+                p_list.append(qt.p)
+                o_list.append(qt.o)
         
-        if not rows:
+        if not qt_id_list:
             return pl.DataFrame({
                 "qt_id": pl.Series([], dtype=pl.UInt64),
                 "s": pl.Series([], dtype=pl.UInt64),
@@ -178,11 +181,12 @@ class QtDict:
                 "o": pl.Series([], dtype=pl.UInt64),
             })
         
-        return pl.DataFrame(rows).cast({
-            "qt_id": pl.UInt64,
-            "s": pl.UInt64,
-            "p": pl.UInt64,
-            "o": pl.UInt64,
+        # Create DataFrame directly from lists (faster than dict rows + cast)
+        return pl.DataFrame({
+            "qt_id": pl.Series(qt_id_list, dtype=pl.UInt64),
+            "s": pl.Series(s_list, dtype=pl.UInt64),
+            "p": pl.Series(p_list, dtype=pl.UInt64),
+            "o": pl.Series(o_list, dtype=pl.UInt64),
         })
     
     def get_id(self, s: TermId, p: TermId, o: TermId) -> Optional[QtId]:

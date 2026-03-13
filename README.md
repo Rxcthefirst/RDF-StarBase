@@ -496,11 +496,11 @@ RDF-StarBase leverages Polars' Rust backend for:
 Start the server:
 
 ```bash
-# Using uvicorn directly
-uvicorn rdf_starbase.web:app --reload
+# Using uvicorn with PYTHONPATH (from project root)
+PYTHONPATH=src python -m uvicorn api.web:app --reload
 
-# Or with the module
-python -m rdf_starbase.web
+# Or use the startup script
+./scripts/start_server.sh
 ```
 
 Then open:

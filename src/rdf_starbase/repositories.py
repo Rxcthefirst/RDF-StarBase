@@ -207,8 +207,13 @@ class RepositoryManager:
             materialize_on_load=materialize_on_load,
         )
         
+        # Create repository directory with WAL
+        repo_dir = self.workspace_path / name
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        wal_dir = repo_dir / "wal"
+        
         self._info[name] = info
-        self._stores[name] = TripleStore()
+        self._stores[name] = TripleStore(wal_dir=str(wal_dir))
         
         # Persist metadata
         self._save_metadata(name)
@@ -275,13 +280,85 @@ class RepositoryManager:
             # Load from disk
             repo_dir = self.workspace_path / name
             store_file = repo_dir / "store.parquet"
+            wal_dir = repo_dir / "wal"
             
             if store_file.exists():
-                self._stores[name] = TripleStore.load(store_file)
+                store = TripleStore.load(store_file, streaming=True)
+                # Enable WAL after loading
+                if not store.has_wal():
+                    from rdf_starbase.storage.transactions import TransactionManager
+                    wal_dir.mkdir(parents=True, exist_ok=True)
+                    store._txn_manager = TransactionManager(
+                        store=store,
+                        wal_dir=str(wal_dir),
+                        sync_mode="normal",
+                    )
+                self._stores[name] = store
             else:
-                self._stores[name] = TripleStore()
+                wal_dir.mkdir(parents=True, exist_ok=True)
+                self._stores[name] = TripleStore(wal_dir=str(wal_dir))
         
         return self._stores[name]
+
+    def get_store_for_bulk_load(self, name: str) -> TripleStore:
+        """
+        Get a lightweight TripleStore for bulk loading.
+
+        Loads only the TermDict + QtDict (needed for term interning).
+        The FactStore starts with an *empty* DataFrame so memory stays
+        proportional to dictionary size (~200-500 MB) instead of full
+        facts (~5+ GB for 9 M triples).
+
+        The returned store must NOT be placed into ``_stores`` — it is
+        a one-shot bulk-load handle.  After loading, call
+        ``save_bulk(name, store)`` to merge new facts with existing
+        on-disk Parquet.
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+
+        repo_dir = self.workspace_path / name
+        store_file = repo_dir / "store.parquet"
+
+        if store_file.exists():
+            store = TripleStore.load_for_bulk(store_file)
+            wal_dir = repo_dir / "wal"
+            if not store.has_wal():
+                from rdf_starbase.storage.transactions import TransactionManager
+                wal_dir.mkdir(parents=True, exist_ok=True)
+                store._txn_manager = TransactionManager(
+                    store=store,
+                    wal_dir=str(wal_dir),
+                    sync_mode="normal",
+                )
+            return store
+        else:
+            wal_dir = repo_dir / "wal"
+            wal_dir.mkdir(parents=True, exist_ok=True)
+            return TripleStore(wal_dir=str(wal_dir))
+
+    def save_bulk(self, name: str, store: TripleStore) -> None:
+        """
+        Persist a bulk-loaded store by appending new facts to the
+        existing Parquet on disk (constant memory).
+
+        After saving, the one-shot store should be discarded.
+        If a fully-loaded store exists in ``_stores``, it is evicted
+        so the next ``get_store()`` reloads fresh data.
+        """
+        if name not in self._info:
+            raise ValueError(f"Repository '{name}' does not exist")
+
+        repo_dir = self.workspace_path / name
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        store_file = repo_dir / "store.parquet"
+
+        store.save_bulk_append(store_file)
+
+        # Evict any cached full store so next access picks up new data
+        self._stores.pop(name, None)
+
+        self._save_metadata(name)
     
     def get_info(self, name: str) -> RepositoryInfo:
         """
@@ -416,17 +493,21 @@ class RepositoryManager:
         self._save_metadata(name)
         return info
     
-    def list_repositories(self) -> list[RepositoryInfo]:
+    def list_repositories(self, include_live_stats: bool = True) -> list[RepositoryInfo]:
         """
         List all repositories with their metadata.
+        
+        Args:
+            include_live_stats: If True, compute live stats for loaded repositories.
+                              If False, only return persisted metadata (much faster).
         
         Returns:
             List of RepositoryInfo objects
         """
         result = []
         for name, info in sorted(self._info.items()):
-            # Update stats only if store is already loaded (use cached stats)
-            if name in self._stores:
+            # Update stats only if requested AND store is already loaded
+            if include_live_stats and name in self._stores:
                 stats = self._stores[name].stats()
                 info.triple_count = stats.get("active_assertions", 0)
                 info.subject_count = stats.get("unique_subjects", 0)

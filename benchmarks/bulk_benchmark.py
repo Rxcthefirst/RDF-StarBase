@@ -27,7 +27,7 @@ DEFAULT_SIZE = "small"
 def benchmark_rdfstarbase(file_path: str) -> dict:
     """Benchmark RDF-StarBase with optimized Oxigraph bulk loading."""
     from src.rdf_starbase import TripleStore, execute_sparql
-    from bulk_loader import bulk_load_turtle_oneshot, OXIGRAPH_AVAILABLE
+    from rdf_starbase.storage.bulk_loader import bulk_load_turtle_oneshot, OXIGRAPH_AVAILABLE
     
     results = {"system": "RDF-StarBase", "oxigraph_parser": OXIGRAPH_AVAILABLE}
     

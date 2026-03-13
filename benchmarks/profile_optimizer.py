@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.rdf_starbase import TripleStore, execute_sparql
-from bulk_loader import bulk_load_turtle_oneshot
+from rdf_starbase.storage.bulk_loader import bulk_load_turtle_oneshot
 
 
 def profile_query(store, query, name):

@@ -1322,7 +1322,7 @@ if __name__ == "__main__":
     sys.path.insert(0, ".")
     
     from src.rdf_starbase import TripleStore, execute_sparql
-    from bulk_loader import bulk_load_turtle_oneshot
+    from rdf_starbase.storage.bulk_loader import bulk_load_turtle_oneshot
     
     print("Loading data...")
     store = TripleStore()

@@ -100,7 +100,7 @@ RDFSTAR_QUERIES = {
 def benchmark_rdfstarbase_load(file_path: str) -> dict:
     """Benchmark RDF-StarBase bulk loading."""
     from src.rdf_starbase import TripleStore
-    from bulk_loader import bulk_load_turtle_oneshot
+    from rdf_starbase.storage.bulk_loader import bulk_load_turtle_oneshot
     
     store = TripleStore()
     t0 = time.time()

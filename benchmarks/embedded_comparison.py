@@ -65,7 +65,7 @@ def generate_benchmark_data(num_triples: int, output_file: str):
 def benchmark_rdfstarbase(file_path: str, iterations: int = 10) -> dict:
     """Benchmark RDF-StarBase."""
     from rdf_starbase import TripleStore, execute_sparql
-    from bulk_loader import bulk_load_turtle_oneshot
+    from rdf_starbase.storage.bulk_loader import bulk_load_turtle_oneshot
     
     results = {"system": "RDF-StarBase", "embedded": True}
     

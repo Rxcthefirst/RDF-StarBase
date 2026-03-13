@@ -1,13 +1,24 @@
 # =============================================================================
 # RDF-StarBase Docker Compose
 # =============================================================================
-# Simple deployment with persistent data volume
+# Production deployment with persistent data volumes
+#
+# Volume Strategy:
+#   - import/     Bulk load source files (read-only)
+#   - repositories/ Persistent graph stores (read-write)
+#   - export/     Backups & exports (read-write)
+#   - security/   API keys & certificates (read-only)
 #
 # Usage (from deploy/compose directory):
 #   docker compose up -d        # Start in background
 #   docker compose logs -f      # View logs
 #   docker compose down         # Stop
 #   docker compose down -v      # Stop and remove volumes
+#
+# Bulk Load Workflow:
+#   1. Place files in ./data/import/{repository_name}/
+#   2. POST /repositories/{repository_name}/bulk-load
+#   3. Monitor: GET /repositories/{repository_name}/bulk-load/jobs/{job_id}
 # =============================================================================
 
 services:
@@ -20,11 +31,38 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Persist repository data
+      # Bulk load source - mount GLEIF data directly (read-only)
+      - ../../data/gleif-lei-data:/data/import/gleif:ro
+      
+      # FIBO data (read-only)
+      - ../../data/fibo:/data/import/fibo:ro
+      
+      # Persistent repository stores - named volume for data safety
       - rdf-starbase-data:/data/repositories
+      
+      # Export directory for backups (host mount for easy access)
+      - ../../data/export:/data/export
+      
+      # Security configuration (read-only)
+      - ../../data/security:/data/security:ro
     environment:
+      # Data paths
       - RDFSTARBASE_REPOSITORY_PATH=/data/repositories
+      - RDFSTARBASE_IMPORT_PATH=/data/import
+      - RDFSTARBASE_EXPORT_PATH=/data/export
+      
+      # Server config
+      - RDFSTARBASE_HOST=0.0.0.0
+      - RDFSTARBASE_PORT=8000
       - RDFSTARBASE_SERVE_STATIC=true
+      
+      # Bulk load tuning
+      - RDFSTARBASE_BULK_BATCH_SIZE=100000
+      - RDFSTARBASE_BULK_MAX_WORKERS=4
+      - RDFSTARBASE_BULK_COMPRESSION=gz,bz2,zip
+      
+      # Security
+      - RDFSTARBASE_API_KEY_PATH=/data/security/api_keys.json
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

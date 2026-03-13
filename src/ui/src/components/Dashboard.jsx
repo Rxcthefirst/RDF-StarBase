@@ -251,7 +251,7 @@ Query method: POST`
 const DEMO_DATA = `@prefix : <http://example.org/> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-@prefix rdfstar: <http://rdf-starbase.dev/> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
 
 # People
 :alice a :Person ;
@@ -311,28 +311,28 @@ const DEMO_DATA = `@prefix : <http://example.org/> .
 
 # RDF-Star Annotations - Provenance and Trust
 << :alice :worksAt :TechCorp >> 
-    rdfstar:source "HR Database" ;
-    rdfstar:confidence 0.99 ;
-    rdfstar:recordedAt "2024-01-15"^^xsd:date .
+    prov:wasDerivedFrom "HR Database" ;
+    prov:value 0.99 ;
+    prov:generatedAtTime "2024-01-15"^^xsd:date .
 
 << :bob :reportsTo :alice >> 
-    rdfstar:source "Org Chart" ;
-    rdfstar:confidence 0.95 ;
-    rdfstar:verifiedBy :hr_system .
+    prov:wasDerivedFrom "Org Chart" ;
+    prov:value 0.95 ;
+    prov:wasAttributedTo :hr_system .
 
 << :TechCorp :employees 500 >>
-    rdfstar:source "Annual Report 2024" ;
-    rdfstar:confidence 0.90 ;
-    rdfstar:asOf "2024-12-31"^^xsd:date .
+    prov:wasDerivedFrom "Annual Report 2024" ;
+    prov:value 0.90 ;
+    prov:generatedAtTime "2024-12-31"^^xsd:date .
 
 << :charlie :worksAt :StartupInc >>
-    rdfstar:source "LinkedIn" ;
-    rdfstar:confidence 0.70 .
+    prov:wasDerivedFrom "LinkedIn" ;
+    prov:value 0.70 .
 
 << :charlie :worksAt :TechCorp >>
-    rdfstar:source "Old Database" ;
-    rdfstar:confidence 0.30 ;
-    rdfstar:note "Outdated record" .
+    prov:wasDerivedFrom "Old Database" ;
+    prov:value 0.30 ;
+    rdfs:comment "Outdated record" .
 
 # Skills and expertise
 :alice :hasSkill :Python, :Leadership, :DataScience .
@@ -360,6 +360,7 @@ export default function Dashboard({
   onSelectRepo,
   repoLoading = false,
   onRefreshRepos,
+  onRefreshStats,
   onOpenImport,
   theme 
 }) {
@@ -367,6 +368,7 @@ export default function Dashboard({
   const [message, setMessage] = useState(null)
   const [repoStats, setRepoStats] = useState(null)
   const [statsKey, setStatsKey] = useState(0) // Force refresh trigger
+  const [refreshingStats, setRefreshingStats] = useState(false)
 
   // Load stats for current repo
   useEffect(() => {
@@ -447,10 +449,10 @@ SELECT ?person ?name ?email WHERE {
     },
     {
       label: 'RDF-Star Annotations',
-      query: `PREFIX rdfstar: <http://rdf-starbase.dev/>
+      query: `PREFIX prov: <http://www.w3.org/ns/prov#>
 SELECT ?s ?p ?o ?source ?confidence WHERE {
-  << ?s ?p ?o >> rdfstar:source ?source .
-  OPTIONAL { << ?s ?p ?o >> rdfstar:confidence ?confidence }
+  << ?s ?p ?o >> prov:wasDerivedFrom ?source .
+  OPTIONAL { << ?s ?p ?o >> prov:value ?confidence }
 }
 ORDER BY DESC(?confidence)`,
       description: 'View statement metadata'
@@ -458,10 +460,10 @@ ORDER BY DESC(?confidence)`,
     {
       label: 'Competing Claims',
       query: `PREFIX : <http://example.org/>
-PREFIX rdfstar: <http://rdf-starbase.dev/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
 SELECT ?person ?company ?source ?confidence WHERE {
-  << ?person :worksAt ?company >> rdfstar:source ?source ;
-                                   rdfstar:confidence ?confidence .
+  << ?person :worksAt ?company >> prov:wasDerivedFrom ?source ;
+                                   prov:value ?confidence .
 }
 ORDER BY ?person DESC(?confidence)`,
       description: 'Find conflicting data'
@@ -497,9 +499,25 @@ ORDER BY ?person DESC(?confidence)`,
         <section className="dashboard-section repositories-section">
           <div className="section-header">
             <h2><DatabaseIcon size={18} /> Repositories</h2>
-            <button className="icon-btn" onClick={onCreateRepo} title="Create Repository">
-              <PlusIcon size={16} />
-            </button>
+            <div style={{display: 'flex', gap: '0.5rem'}}>
+              {repositories.length > 0 && onRefreshStats && (
+                <button 
+                  className="icon-btn" 
+                  onClick={async () => {
+                    setRefreshingStats(true)
+                    await onRefreshStats()
+                    setRefreshingStats(false)
+                  }} 
+                  title="Refresh All Stats"
+                  disabled={refreshingStats}
+                >
+                  <RefreshIcon size={16} />
+                </button>
+              )}
+              <button className="icon-btn" onClick={onCreateRepo} title="Create Repository">
+                <PlusIcon size={16} />
+              </button>
+            </div>
           </div>
           
           {repositories.length === 0 ? (

@@ -997,6 +997,120 @@ class TripleStore:
         self._invalidate_cache()
         return n
 
+    def add_triples_columnar_with_dedup(
+        self,
+        subjects: Optional[list[str]] = None,
+        predicates: Optional[list[str]] = None,
+        objects: Optional[list[Any]] = None,
+        subjects_ids: Optional[list[int]] = None,
+        predicates_ids: Optional[list[int]] = None,
+        objects_ids: Optional[list[int]] = None,
+        provenance: Optional["ProvenanceContext"] = None,
+        source: str = "unknown",
+        confidence: float = 1.0,
+        graph: Optional[str] = None,
+    ) -> tuple[int, int]:
+        """
+        Add triples with smart deduplication (append-only strategy).
+        
+        Deduplication logic:
+        - If (s, p, o) + provenance exists with same metadata: SKIP (duplicate)
+        - If (s, p, o) exists with different metadata: ADD (competing claim)
+        - If (s, p, o) doesn't exist: ADD (new triple)
+        
+        This preserves provenance tracking while avoiding exact duplicates.
+        
+        Args:
+            subjects: List of subject URIs (or subjects_ids)
+            predicates: List of predicate URIs (or predicates_ids)
+            objects: List of object values (or objects_ids)
+            subjects_ids: Pre-interned subject IDs (alternative to subjects)
+            predicates_ids: Pre-interned predicate IDs
+            objects_ids: Pre-interned object IDs
+            provenance: ProvenanceContext for batch
+            source: Shared source (if provenance not provided)
+            confidence: Shared confidence
+            graph: Optional graph URI
+            
+        Returns:
+            Tuple of (triples_added, triples_skipped)
+        """
+        # Determine source and confidence
+        if provenance:
+            source = provenance.source
+            confidence = provenance.confidence
+        
+        # Intern IDs if needed
+        if subjects_ids is None:
+            if subjects is None:
+                return 0, 0
+            subjects_ids = self._term_dict.intern_iris_batch(subjects)
+        
+        if predicates_ids is None:
+            if predicates is None:
+                return 0, 0
+            predicates_ids = self._term_dict.intern_iris_batch(predicates)
+        
+        if objects_ids is None:
+            if objects is None:
+                return 0, 0
+            objects_ids = [self._intern_term(o) for o in objects]
+        
+        n = len(subjects_ids)
+        if n == 0:
+            return 0, 0
+        
+        # Intern graph and source
+        g_id = self._term_dict.intern_iri(graph) if graph else DEFAULT_GRAPH_ID
+        source_id = self._term_dict.intern_literal(source)
+        
+        # Check for existing triples with same provenance
+        # Build a set of (g, s, p, o, source, confidence) tuples for comparison
+        existing_df = self._fact_store._df
+        
+        # Create set of existing (s, p, o, source, confidence) combinations
+        if len(existing_df) > 0:
+            existing_set = set()
+            for row in existing_df.iter_rows():
+                # Row format: (g, s, p, o, flags, source, confidence, ...)
+                existing_set.add((row[1], row[2], row[3], row[5], row[6]))
+        else:
+            existing_set = set()
+        
+        # Filter out exact duplicates (same triple + same provenance)
+        g_col = []
+        s_col = []
+        p_col = []
+        o_col = []
+        skipped = 0
+        
+        for i in range(n):
+            key = (subjects_ids[i], predicates_ids[i], objects_ids[i], source_id, confidence)
+            if key in existing_set:
+                skipped += 1
+            else:
+                g_col.append(g_id)
+                s_col.append(subjects_ids[i])
+                p_col.append(predicates_ids[i])
+                o_col.append(objects_ids[i])
+        
+        added = len(s_col)
+        
+        if added > 0:
+            # Add new triples
+            self._fact_store.add_facts_columnar(
+                g_col=g_col,
+                s_col=s_col,
+                p_col=p_col,
+                o_col=o_col,
+                flags=FactFlags.ASSERTED,
+                source=source_id,
+                confidence=confidence,
+            )
+            self._invalidate_cache()
+        
+        return added, skipped
+
     def begin_bulk_insert(self) -> None:
         """Begin bulk insertion mode.
         
@@ -1172,6 +1286,58 @@ class TripleStore:
         
         # Also save the legacy format for backward compatibility
         self._df.write_parquet(path)
+
+    def save_bulk_append(self, path: Path | str) -> None:
+        """
+        Save after a bulk load: append new facts to existing Parquet on
+        disk *without* loading old facts into memory.
+
+        Also saves updated TermDict, QtDict, and metadata (they are
+        already in memory and relatively small).
+        """
+        from rdf_starbase.storage.persistence import StoragePersistence
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        store_dir = path.parent / (path.stem + "_unified")
+        store_dir.mkdir(parents=True, exist_ok=True)
+
+        persistence = StoragePersistence(store_dir)
+        # Append facts via lazy scan (constant memory)
+        persistence.append_facts(self._fact_store)
+        # Append new terms (only terms created during this bulk load)
+        persistence.append_terms(self._term_dict)
+        persistence._save_quoted(self._qt_dict)
+        persistence._save_metadata(self._term_dict, self._fact_store, self._qt_dict)
+
+        # Legacy format: skip writing full DF (would require loading
+        # existing data).  The unified format is authoritative.
+
+    @classmethod
+    def load_for_bulk(cls, path: Path | str) -> "TripleStore":
+        """
+        Load a store for bulk loading: TermDict + QtDict in memory,
+        FactStore empty.  Memory stays proportional to *dictionary size*
+        (typically <500 MB for 10M+ triple stores) instead of full facts.
+
+        After bulk loading, call ``save_bulk_append()`` to merge new facts
+        with existing on-disk Parquet without loading old facts.
+        """
+        from rdf_starbase.storage.persistence import StoragePersistence
+
+        path = Path(path)
+        store_dir = path.parent / (path.stem + "_unified")
+
+        if not store_dir.exists():
+            # No unified storage yet — return empty store
+            return cls()
+
+        persistence = StoragePersistence(store_dir)
+        store = cls()
+        store._term_dict, store._fact_store, store._qt_dict = persistence.load_for_bulk()
+        store._init_common_terms()
+        return store
     
     @classmethod
     def load(cls, path: Path | str, streaming: bool = False) -> "TripleStore":
@@ -2157,16 +2323,21 @@ class TripleStore:
 
         XSD_STRING = "http://www.w3.org/2001/XMLSchema#string"
         BATCH = 2_000_000
+        # Flush to main DataFrame every MERGE_EVERY batches to bound memory.
+        # With BATCH=2M and MERGE_EVERY=3, we merge every 6M rows (~460MB),
+        # keeping peak overhead well under 1GB even for multi-GB files.
+        MERGE_EVERY = 3
 
         # accumulators
         s_ids: list = []
         p_ids: list = []
         o_ids: list = []
         count = 0
+        batch_count = 0  # number of _flush() calls since last merge
 
         # --- helpers -----------------------------------------------------
         def _flush():
-            nonlocal count
+            nonlocal count, batch_count
             n = len(s_ids)
             if n == 0:
                 return
@@ -2185,9 +2356,19 @@ class TripleStore:
             )
             fs._batch_buffer.append(new_df)
             count += n
+            batch_count += 1
             s_ids.clear()
             p_ids.clear()
             o_ids.clear()
+
+            # Periodically merge buffered DataFrames into main DF to
+            # bound memory.  Without this, a 781 MB file buffers ~10
+            # DataFrames (20 M rows) before the final flush_batch() –
+            # tripling peak memory when concatenated with the existing DF.
+            if batch_count >= MERGE_EVERY:
+                fs.flush_batch()
+                fs.begin_batch()
+                batch_count = 0
 
         # --- stream parse ------------------------------------------------
         if is_gzipped:

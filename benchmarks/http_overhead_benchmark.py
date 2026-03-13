@@ -38,7 +38,7 @@ def run_benchmark(embedded_only: bool = False):
     print("Setting up...")
     
     from rdf_starbase import TripleStore, execute_sparql
-    from bulk_loader import bulk_load_turtle_oneshot
+    from rdf_starbase.storage.bulk_loader import bulk_load_turtle_oneshot
     
     store = TripleStore()
     

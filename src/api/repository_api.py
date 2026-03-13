@@ -6,6 +6,7 @@ Provides REST endpoints for managing multiple repositories:
 - List repositories
 - Get repository info
 - Scoped SPARQL queries per repository
+- Bulk load operations
 """
 
 from pathlib import Path
@@ -18,13 +19,14 @@ import hashlib
 import tempfile
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 import polars as pl
 
 from rdf_starbase.repositories import RepositoryManager, RepositoryInfo
 from rdf_starbase import execute_sparql
+from api.bulk_load_service import BulkLoadService, BulkLoadStatus
 
 
 # =============================================================================
@@ -82,6 +84,15 @@ class SQLAggregateRequest(BaseModel):
     limit: Optional[int] = Field(None, description="LIMIT")
 
 
+class BulkLoadRequest(BaseModel):
+    """Request to bulk load files from import directory."""
+    files: list[str] = Field(..., description="List of file paths relative to import directory")
+    provenance: Optional[dict] = Field(
+        None,
+        description="Batch provenance metadata (source, confidence, process, etc.)"
+    )
+
+
 class RepositoryResponse(BaseModel):
     """Response containing repository info."""
     name: str
@@ -114,19 +125,13 @@ class RepositoryResponse(BaseModel):
 
 def dataframe_to_records(df: pl.DataFrame) -> list[dict]:
     """Convert Polars DataFrame to list of dicts for JSON serialization."""
-    from datetime import datetime
-    records = []
-    for row in df.iter_rows(named=True):
-        record = {}
-        for k, v in row.items():
-            if isinstance(v, datetime):
-                record[k] = v.isoformat()
-            elif v is None:
-                record[k] = None
-            else:
-                record[k] = v
-        records.append(record)
-    return records
+    from datetime import datetime as dt
+    # Cast datetime columns to string for JSON compatibility
+    dt_cols = [c for c, t in zip(df.columns, df.dtypes) if t == pl.Datetime or t == pl.Date]
+    if dt_cols:
+        df = df.with_columns([pl.col(c).cast(pl.Utf8) for c in dt_cols])
+    # Native Polars to_dicts is implemented in Rust — far faster than iter_rows
+    return df.to_dicts()
 
 
 # Provenance predicate URIs to recognize in RDF-Star annotations
@@ -134,26 +139,23 @@ PROV_SOURCE_PREDICATES = {
     "http://www.w3.org/ns/prov#wasDerivedFrom",
     "http://www.w3.org/ns/prov#wasAttributedTo",
     "http://www.w3.org/ns/prov#hadPrimarySource",
-    # RDF-StarBase native predicates
-    "<http://rdf-starbase.dev/source>",
-    "http://rdf-starbase.dev/source",
+    "<http://www.w3.org/ns/prov#wasDerivedFrom>",
+    "<http://www.w3.org/ns/prov#wasAttributedTo>",
+    "<http://www.w3.org/ns/prov#hadPrimarySource>",
 }
 PROV_PROCESS_PREDICATES = {
     "http://www.w3.org/ns/prov#wasGeneratedBy",
-    "<http://rdf-starbase.dev/process>",
-    "http://rdf-starbase.dev/process",
+    "<http://www.w3.org/ns/prov#wasGeneratedBy>",
 }
 PROV_CONFIDENCE_PREDICATES = {
     "http://www.w3.org/ns/prov#value",
-    "<http://rdf-starbase.dev/confidence>",
-    "http://rdf-starbase.dev/confidence",
+    "<http://www.w3.org/ns/prov#value>",
 }
 PROV_TIMESTAMP_PREDICATES = {
     "http://www.w3.org/ns/prov#generatedAtTime",
-    "<http://rdf-starbase.dev/recordedAt>",
-    "http://rdf-starbase.dev/recordedAt",
-    "<http://rdf-starbase.dev/asOf>",
-    "http://rdf-starbase.dev/asOf",
+    "http://www.w3.org/ns/prov#invalidatedAtTime",
+    "<http://www.w3.org/ns/prov#generatedAtTime>",
+    "<http://www.w3.org/ns/prov#invalidatedAtTime>",
 }
 
 
@@ -410,14 +412,33 @@ def create_repository_router(
     manager = RepositoryManager(workspace_path)
     router = APIRouter(prefix="/repositories", tags=["Repositories"])
     
+    # Initialize bulk load service
+    import_path = os.environ.get("RDFSTARBASE_IMPORT_PATH", "./data/import")
+    batch_size = int(os.environ.get("RDFSTARBASE_BULK_BATCH_SIZE", "100000"))
+    max_workers = int(os.environ.get("RDFSTARBASE_BULK_MAX_WORKERS", "4"))
+    
+    bulk_load_service = BulkLoadService(
+        repository_manager=manager,
+        import_base_path=Path(import_path),
+        batch_size=batch_size,
+        max_workers=max_workers,
+    )
+    
     # =========================================================================
     # Repository CRUD
     # =========================================================================
     
     @router.get("")
-    async def list_repositories():
-        """List all repositories with inline stats."""
-        repos = manager.list_repositories()
+    async def list_repositories(include_stats: bool = False):
+        """List all repositories with optional inline stats.
+        
+        Args:
+            include_stats: If True, compute live stats for loaded repositories.
+                          If False (default), only return persisted metadata.
+                          For better performance with many loaded repos, use False
+                          and call /repositories/bulk-stats separately when needed.
+        """
+        repos = manager.list_repositories(include_live_stats=include_stats)
         return {
             "count": len(repos),
             "repositories": [RepositoryResponse.from_info(r).model_dump() for r in repos]
@@ -1602,6 +1623,138 @@ def create_repository_router(
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+    
+    # =========================================================================
+    # Bulk Load Operations (GraphDB-style)
+    # =========================================================================
+    
+    @router.post("/{name}/bulk-load")
+    async def submit_bulk_load(name: str, request: BulkLoadRequest):
+        """
+        Submit a bulk load job for files in the import directory.
+        
+        **GraphDB-style bulk loading:**
+        1. Place RDF files in `data/import/{repository_name}/`
+        2. Call this endpoint with file paths
+        3. Monitor progress via `/bulk-load/jobs/{job_id}`
+        
+        **Features:**
+        - Streaming ingestion for multi-GB files
+        - Compression support (.gz, .bz2, .zip)
+        - Batch provenance metadata
+        - Transaction support with rollback
+        - Smart deduplication
+        
+        **Example:**
+        ```
+        POST /repositories/gleif/bulk-load
+        {
+            "files": ["gleif/L1Data.ttl.gz", "gleif/L2Data.ttl.gz"],
+            "provenance": {
+                "source": "gleif:2026-02",
+                "confidence": 1.0,
+                "process": "bulk_import",
+                "metadata": {"release": "2026-02-12"}
+            }
+        }
+        ```
+        """
+        try:
+            # Verify repository exists
+            manager.get_store(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        
+        try:
+            # Submit job
+            job = bulk_load_service.submit_job(
+                repository_name=name,
+                files=[f"{name}/{f}" if not f.startswith(name) else f for f in request.files],
+                batch_provenance=request.provenance,
+            )
+            
+            return {
+                "success": True,
+                "job_id": job.job_id,
+                "status": job.status.value,
+                "files": len(job.files),
+                "message": f"Bulk load job submitted with {len(job.files)} file(s)",
+                "monitor_url": f"/repositories/{name}/bulk-load/jobs/{job.job_id}",
+            }
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to submit bulk load: {str(e)}")
+    
+    @router.get("/{name}/bulk-load/jobs/{job_id}")
+    async def get_bulk_load_status(name: str, job_id: str):
+        """
+        Get status and progress of a bulk load job.
+        
+        **Returns:**
+        - job_id, status, progress metrics
+        - Real-time throughput (triples/second)
+        - ETA for completion
+        - Error details if failed
+        """
+        job = bulk_load_service.get_job_status(job_id)
+        
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        if job.repository_name != name:
+            raise HTTPException(status_code=400, detail="Job belongs to different repository")
+        
+        return job.to_dict()
+    
+    @router.get("/{name}/bulk-load/jobs")
+    async def list_bulk_load_jobs(name: str, status: Optional[str] = Query(None)):
+        """
+        List all bulk load jobs for a repository.
+        
+        **Optional filter by status:**
+        - pending
+        - running
+        - completed
+        - failed
+        - cancelled
+        """
+        jobs = bulk_load_service.list_jobs(repository_name=name)
+        
+        # Filter by status if provided
+        if status:
+            try:
+                status_enum = BulkLoadStatus(status.lower())
+                jobs = [j for j in jobs if j.status == status_enum]
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+        
+        return {
+            "repository": name,
+            "count": len(jobs),
+            "jobs": [j.to_dict() for j in jobs],
+        }
+    
+    @router.delete("/{name}/bulk-load/jobs/{job_id}")
+    async def cancel_bulk_load(name: str, job_id: str):
+        """
+        Cancel a running bulk load job.
+        
+        **Note:** Only pending or running jobs can be cancelled.
+        """
+        success = await bulk_load_service.cancel_job(job_id)
+        
+        if not success:
+            job = bulk_load_service.get_job_status(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="Job not found")
+            raise HTTPException(status_code=400, detail=f"Cannot cancel job in status: {job.status}")
+        
+        return {
+            "success": True,
+            "job_id": job_id,
+            "message": "Job cancelled",
+        }
     
     # =========================================================================
     # Persistence

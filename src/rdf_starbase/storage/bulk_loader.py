@@ -9,9 +9,9 @@ import time
 from pathlib import Path
 from typing import Optional, Iterator, List, Tuple, Any
 from dataclasses import dataclass
-from src.rdf_starbase import TripleStore
-from src.rdf_starbase.formats.turtle import TurtleParser
-from src.rdf_starbase.models import Triple
+from rdf_starbase.store import TripleStore
+from rdf_starbase.formats.turtle import TurtleParser
+from rdf_starbase.models import Triple
 
 # Try to import Oxigraph for fast parsing (~17x faster)
 try:
@@ -683,6 +683,99 @@ def bulk_load_turtle_fast(
     return total_triples
 
 
+def stream_load_string_with_dedup(
+    store: "TripleStore",
+    content: str,
+    format_type: str,
+    provenance: "ProvenanceContext",
+    batch_size: int = 100_000,
+) -> dict:
+    """
+    Stream load RDF content with smart deduplication.
+    
+    Deduplication strategy (append-only):
+    - If triple + metadata exists: skip (no change)
+    - If triple exists with different metadata: add new assertion (provenance tracking)
+    - If triple doesn't exist: add
+    
+    Args:
+        store: TripleStore to load into
+        content: RDF content string
+        format_type: Format (turtle, ntriples, etc.)
+        provenance: Provenance context for batch
+        batch_size: Triples per batch
+        
+    Returns:
+        Dict with stats (triples_parsed, triples_loaded, triples_skipped)
+    """
+    triples_parsed = 0
+    triples_loaded = 0
+    triples_skipped = 0
+    
+    # Parse based on format
+    if format_type in ("turtle", "ttl"):
+        # Try Oxigraph fast path
+        has_rdfstar = '<<' in content and '>>' in content
+        if not has_rdfstar and OXIGRAPH_AVAILABLE:
+            try:
+                quads = list(oxigraph_parse(content.encode('utf-8'), RdfFormat.TURTLE, base_iri="http://example.org/"))
+                
+                # Batch process with deduplication
+                for i in range(0, len(quads), batch_size):
+                    batch = quads[i:i+batch_size]
+                    triples_parsed += len(batch)
+                    
+                    # Intern to IDs
+                    s_ids, p_ids, o_ids = intern_quads_batch(store, batch)
+                    
+                    # Add with deduplication check
+                    loaded, skipped = store.add_triples_columnar_with_dedup(
+                        subjects_ids=s_ids,
+                        predicates_ids=p_ids,
+                        objects_ids=o_ids,
+                        provenance=provenance,
+                    )
+                    
+                    triples_loaded += loaded
+                    triples_skipped += skipped
+                
+                return {
+                    "triples_parsed": triples_parsed,
+                    "triples_loaded": triples_loaded,
+                    "triples_skipped": triples_skipped,
+                }
+            except Exception:
+                pass  # Fall back to Python parser
+    
+    # Python parser fallback
+    from rdf_starbase.formats.turtle import parse_turtle
+    parsed = parse_turtle(content)
+    triples_parsed = len(parsed.triples)
+    
+    # Batch load with deduplication
+    for i in range(0, len(parsed.triples), batch_size):
+        batch = parsed.triples[i:i+batch_size]
+        subjects = [t.subject for t in batch]
+        predicates = [t.predicate for t in batch]
+        objects = [t.object for t in batch]
+        
+        loaded, skipped = store.add_triples_columnar_with_dedup(
+            subjects=subjects,
+            predicates=predicates,
+            objects=objects,
+            provenance=provenance,
+        )
+        
+        triples_loaded += loaded
+        triples_skipped += skipped
+    
+    return {
+        "triples_parsed": triples_parsed,
+        "triples_loaded": triples_loaded,
+        "triples_skipped": triples_skipped,
+    }
+
+
 def benchmark_parsers(file_path: str, limit_lines: int = 100_000) -> dict:
     """
     Benchmark different parsing approaches.
@@ -751,69 +844,3 @@ def benchmark_parsers(file_path: str, limit_lines: int = 100_000) -> dict:
             print(f"Speedup: {speedup:.1f}x faster with Oxigraph")
     
     return results
-
-
-if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) < 2:
-        print("Usage: python bulk_loader.py <file.ttl|file.ttl.gz> [limit_lines] [--benchmark] [--no-oxigraph]")
-        print(f"\nOxigraph available: {OXIGRAPH_AVAILABLE}")
-        if not OXIGRAPH_AVAILABLE:
-            print("Install with: pip install pyoxigraph")
-        sys.exit(1)
-    
-    file_path = sys.argv[1]
-    limit = None
-    benchmark = False
-    use_oxigraph = True
-    
-    for arg in sys.argv[2:]:
-        if arg == "--benchmark":
-            benchmark = True
-        elif arg == "--no-oxigraph":
-            use_oxigraph = False
-        elif arg.isdigit():
-            limit = int(arg)
-    
-    if benchmark:
-        benchmark_parsers(file_path, limit or 100_000)
-        sys.exit(0)
-    
-    store = TripleStore()
-    
-    if limit:
-        # Limited test
-        print(f"Testing with first {limit:,} lines...")
-        import gzip
-        path = Path(file_path)
-        
-        if path.suffix.lower() == ".gz":
-            f = gzip.open(path, 'rt', encoding='utf-8')
-        else:
-            f = open(path, 'r', encoding='utf-8')
-        
-        lines = []
-        for i, line in enumerate(f):
-            lines.append(line)
-            if i >= limit:
-                break
-        f.close()
-        
-        # Write to temp file
-        temp_path = "temp_test.ttl"
-        with open(temp_path, 'w', encoding='utf-8') as tf:
-            tf.writelines(lines)
-        
-        count = bulk_load_turtle(store, temp_path, use_oxigraph=use_oxigraph)
-        Path(temp_path).unlink()
-    else:
-        count = bulk_load_turtle(store, file_path, use_oxigraph=use_oxigraph)
-    
-    print(f"\nStore statistics:")
-    print(f"  Total triples: {len(store):,}")
-    
-    # Quick query test
-    from src.rdf_starbase import execute_sparql
-    result = execute_sparql(store, "SELECT (COUNT(*) as ?c) WHERE { ?s ?p ?o }")
-    print(f"  SPARQL count: {result}")

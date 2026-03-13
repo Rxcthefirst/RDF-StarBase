@@ -144,6 +144,33 @@ class StoragePersistence:
         self._load_metadata(term_dict, fact_store, qt_dict)
         
         return term_dict, fact_store, qt_dict
+
+    def load_for_bulk(self) -> tuple[TermDict, FactStore, QtDict]:
+        """
+        Load storage components for bulk loading: TermDict + QtDict fully,
+        but FactStore with an EMPTY DataFrame (no existing facts loaded).
+
+        This allows bulk_load_file() to intern terms using the existing
+        dictionaries while keeping memory usage proportional to *new* data
+        only.  After loading, call ``append_facts()`` to merge new facts
+        with the existing Parquet on disk without loading old data.
+
+        Returns:
+            Tuple of (TermDict, FactStore, QtDict)
+        """
+        if not self.base_path.exists():
+            raise FileNotFoundError(f"Storage directory not found: {self.base_path}")
+
+        term_dict = self._load_terms_for_bulk()
+        qt_dict = self._load_quoted(term_dict)
+
+        # Empty FactStore — no facts loaded into memory
+        fact_store = self._load_facts_empty(term_dict, qt_dict)
+
+        # Restore metadata counters (txn IDs, etc.)
+        self._load_metadata(term_dict, fact_store, qt_dict)
+
+        return term_dict, fact_store, qt_dict
     
     def exists(self) -> bool:
         """Check if a saved storage exists at the base path."""
@@ -244,9 +271,159 @@ class StoragePersistence:
         
         return term_dict
     
+    def _load_terms_for_bulk(self) -> TermDict:
+        """Load term dictionary optimized for bulk loading (write-only).
+
+        Builds only the forward caches (string → TermId) needed for
+        ``intern_iri()``, ``intern_literal()``, ``intern_bnode()``.
+        Skips ``LazyTermLookup`` (reverse lookup, ~800 MB for large
+        datasets) since bulk loading never resolves TermId → string.
+
+        Uses a plain dict for ``_id_to_term`` so new terms can be
+        registered without LazyTermLookup overhead.
+        """
+        terms_path = self.base_path / self.TERMS_FILE
+        if not terms_path.exists():
+            return TermDict()
+
+        df = pl.read_parquet(terms_path)
+
+        term_dict = TermDict.__new__(TermDict)
+        term_dict._hash_to_id = {}
+        term_dict._collision_count = 0
+        # Plain dict for _id_to_term — new terms written here
+        term_dict._id_to_term = {}
+
+        # Compute _next_payload from max existing IDs per kind
+        term_dict._next_payload = {
+            TermKind.IRI: 0,
+            TermKind.LITERAL: 0,
+            TermKind.BNODE: 0,
+            TermKind.QUOTED_TRIPLE: 0,
+        }
+        for kind in (TermKind.IRI, TermKind.LITERAL, TermKind.BNODE, TermKind.QUOTED_TRIPLE):
+            kind_df = df.filter(df["kind"] == kind.value)
+            if len(kind_df) > 0:
+                max_id = kind_df["term_id"].max()
+                # Extract payload from TermId (lower 56 bits)
+                term_dict._next_payload[kind] = (max_id & 0x00FFFFFFFFFFFFFF) + 1
+
+        # Build forward caches (string → TermId) — the only thing
+        # intern_*() needs for existing terms.
+        iri_df = df.filter(df["kind"] == TermKind.IRI.value)
+        term_dict._iri_cache = dict(zip(
+            iri_df["lex"].to_list(), iri_df["term_id"].to_list()
+        ))
+
+        lit_df = df.filter(df["kind"] == TermKind.LITERAL.value)
+        term_dict._plain_literal_cache = dict(zip(
+            lit_df["lex"].to_list(), lit_df["term_id"].to_list()
+        ))
+
+        bnode_df = df.filter(df["kind"] == TermKind.BNODE.value)
+        term_dict._bnode_cache = dict(zip(
+            bnode_df["lex"].to_list(), bnode_df["term_id"].to_list()
+        ))
+
+        # Release the DataFrame — caches are now the only consumers
+        del df, iri_df, lit_df, bnode_df
+
+        return term_dict
+
     def _save_facts(self, fact_store: FactStore) -> None:
         """Save fact store to Parquet."""
         fact_store._df.write_parquet(self.base_path / self.FACTS_FILE)
+
+    def _load_facts_empty(self, term_dict: TermDict, qt_dict: QtDict) -> FactStore:
+        """Create a FactStore with an empty DataFrame (no facts loaded).
+
+        Used by ``load_for_bulk()`` so that bulk loading can intern terms
+        against the existing dictionaries without pulling old facts into RAM.
+        """
+        fact_store = FactStore.__new__(FactStore)
+        fact_store._term_dict = term_dict
+        fact_store._qt_dict = qt_dict
+        fact_store._next_txn = 0
+        fact_store._default_graph_id = 0
+        fact_store._batch_buffer = None
+
+        from rdf_starbase.storage.indexing import IndexManager
+        fact_store._index_manager = IndexManager()
+        fact_store._index_manager.create_index("s")
+        fact_store._index_manager.create_index("p")
+        fact_store._index_manager.create_index("o")
+        fact_store._indexes_stale = True
+
+        fact_store._df = fact_store._create_empty_dataframe()
+        return fact_store
+
+    def append_facts(self, fact_store: FactStore) -> None:
+        """Append *new* facts (in ``fact_store._df``) to the existing
+        ``facts.parquet`` on disk **without loading old data into memory**.
+
+        Strategy:
+        1. Lazy-scan the existing Parquet (zero RAM).
+        2. Concat the new DataFrame as a lazy scan.
+        3. Sink the result back to Parquet in streaming mode.
+
+        This keeps peak memory proportional to the *new* batch, not the
+        entire dataset.  Also saves updated terms and quoted triples
+        (which are already in memory, but small).
+        """
+        facts_path = self.base_path / self.FACTS_FILE
+        new_df = fact_store._df
+
+        if facts_path.exists() and len(new_df) > 0:
+            # Lazy-scan existing file (no RAM), concat with new data
+            old_lazy = pl.scan_parquet(facts_path, low_memory=True)
+            combined_lazy = pl.concat([old_lazy, new_df.lazy()], how="vertical")
+            # Write via streaming sink → constant memory
+            tmp_path = facts_path.with_suffix(".tmp.parquet")
+            combined_lazy.sink_parquet(tmp_path)
+            # Atomic swap
+            tmp_path.rename(facts_path)
+        elif len(new_df) > 0:
+            new_df.write_parquet(facts_path)
+        # else: nothing to write
+
+    def append_terms(self, term_dict: TermDict) -> None:
+        """Append *new* terms to the existing ``terms.parquet`` on disk.
+
+        When loaded via ``_load_terms_for_bulk()``, ``_id_to_term`` is a
+        plain dict containing only terms created during the bulk load.
+        This method merges those new terms with the existing Parquet
+        without loading the full old data into memory.
+        """
+        terms_path = self.base_path / self.TERMS_FILE
+        id_to_term = term_dict._id_to_term
+
+        # Build DataFrame of NEW terms only (plain dict entries)
+        if isinstance(id_to_term, dict) and len(id_to_term) > 0:
+            term_ids = []
+            kinds = []
+            lexes = []
+            for tid, term in id_to_term.items():
+                term_ids.append(tid)
+                kinds.append(term.kind.value)
+                lexes.append(term.lex)
+
+            new_df = pl.DataFrame({
+                "term_id": pl.Series(term_ids, dtype=pl.UInt64),
+                "kind": pl.Series(kinds, dtype=pl.UInt8),
+                "lex": pl.Series(lexes, dtype=pl.Utf8),
+            })
+
+            if terms_path.exists():
+                old_lazy = pl.scan_parquet(terms_path, low_memory=True)
+                combined = pl.concat([old_lazy, new_df.lazy()], how="vertical")
+                tmp_path = terms_path.with_suffix(".tmp.parquet")
+                combined.sink_parquet(tmp_path)
+                tmp_path.rename(terms_path)
+            else:
+                new_df.write_parquet(terms_path)
+        elif isinstance(id_to_term, LazyTermLookup):
+            # Full term dict loaded — just overwrite
+            self._save_terms(term_dict)
     
     def _load_facts(self, term_dict: TermDict, qt_dict: QtDict) -> FactStore:
         """Load fact store from Parquet."""
@@ -298,10 +475,10 @@ class StoragePersistence:
         
         facts_path = self.base_path / self.FACTS_FILE
         if facts_path.exists():
-            # Use scan_parquet for memory-mapped lazy loading
-            # memory_map=True tells Polars to use mmap for the file
-            lazy_df = pl.scan_parquet(facts_path, memory_map=True)
-            # Collect immediately but Polars will use streaming internally
+            # Use scan_parquet for lazy loading with low_memory mode
+            # low_memory=True tells Polars to prefer memory-efficient strategies
+            lazy_df = pl.scan_parquet(facts_path, low_memory=True)
+            # Collect with streaming=True so Polars processes in batches
             # for files larger than available memory
             fact_store._df = lazy_df.collect(streaming=True)
         else:

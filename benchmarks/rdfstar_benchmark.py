@@ -79,7 +79,7 @@ def generate_rdfstar_data(num_facts: int, output_file: str):
 def run_rdfstar_benchmark(data_file: str, iterations: int = 10):
     """Run RDF-Star specific benchmarks."""
     from rdf_starbase import TripleStore, execute_sparql
-    from bulk_loader import bulk_load_turtle_oneshot
+    from rdf_starbase.storage.bulk_loader import bulk_load_turtle_oneshot
     
     print("=" * 70)
     print("RDF-Star Workload Benchmark")

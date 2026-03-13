@@ -102,6 +102,7 @@ const DEFAULT_TYPE_COLORS = [
 // ============================================================================
 function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles, selectedNodeId }) {
   const svgRef = useRef(null)
+  const gRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
   
   // Get color for a node based on its types
@@ -181,6 +182,7 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles,
     svg.call(zoom)
     
     const g = svg.append('g')
+    gRef.current = g
     
     // KeyLines-style organic layout:
     // 1. Run simulation to completion (fast alpha decay)
@@ -262,7 +264,8 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles,
       .data(nodes)
       .join('g')
       .attr('cursor', 'grab')
-      .attr('class', d => d.id === selectedNodeId ? 'node selected' : 'node')
+      .attr('class', 'node')
+      .attr('data-node-id', d => d.id)
       .call(d3.drag()
         .on('start', (event, d) => {
           d3.select(event.sourceEvent.target.parentNode).attr('cursor', 'grabbing')
@@ -289,8 +292,8 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles,
     node.append('circle')
       .attr('r', 20)
       .attr('fill', d => getNodeColor(d))
-      .attr('stroke', d => d.id === selectedNodeId ? '#fff' : (isDark ? '#89b4fa' : '#1e66f5'))
-      .attr('stroke-width', d => d.id === selectedNodeId ? 3 : 2)
+      .attr('stroke', isDark ? '#89b4fa' : '#1e66f5')
+      .attr('stroke-width', 2)
     
     node.append('text')
       .attr('dy', 38)
@@ -317,7 +320,20 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles,
     })
     
     return () => simulation.stop()
-  }, [nodes, edges, theme, onNodeClick, onEdgeClick, getNodeColor, getNodeLabel, selectedNodeId])
+  }, [nodes, edges, theme, onNodeClick, onEdgeClick, getNodeColor, getNodeLabel])
+
+  // Lightweight selection highlight — no re-layout, no zoom reset
+  useEffect(() => {
+    if (!gRef.current) return
+    const isDark = theme === 'dark'
+    const defaultStroke = isDark ? '#89b4fa' : '#1e66f5'
+    gRef.current.selectAll('g.node').each(function (d) {
+      const isSelected = d.id === selectedNodeId
+      d3.select(this).select('circle')
+        .attr('stroke', isSelected ? '#fff' : defaultStroke)
+        .attr('stroke-width', isSelected ? 3 : 2)
+    })
+  }, [selectedNodeId, theme])
   
   return (
     <div className="graph-container">
@@ -547,6 +563,31 @@ function App() {
     }
   }, [])
 
+  // Refresh all repository stats using bulk-stats endpoint (avoids N separate calls)
+  const refreshAllStats = useCallback(async () => {
+    try {
+      const data = await fetchJson('/repositories/bulk-stats')
+      const statsMap = data.repositories || {}
+      
+      // Merge stats with existing repositories
+      setRepositories(prev => prev.map(repo => {
+        const stats = statsMap[repo.name]
+        if (stats) {
+          return {
+            ...repo,
+            triple_count: stats.triple_count,
+            subject_count: stats.subject_count,
+            predicate_count: stats.predicate_count,
+            loaded: stats.loaded,
+          }
+        }
+        return repo
+      }))
+    } catch (err) {
+      console.error('Failed to refresh stats:', err)
+    }
+  }, [])
+
   // Load stats
   const loadStats = useCallback(async (repoName) => {
     if (!repoName) {
@@ -765,34 +806,23 @@ function App() {
       // Supports both internal provenance and W3C PROV vocabulary
       const propertiesQuery = `
         PREFIX prov: <http://www.w3.org/ns/prov#>
-        PREFIX rdfstar: <http://rdf-starbase.dev/>
         
         SELECT ?p ?o ?source ?confidence ?timestamp ?metaPred ?metaVal WHERE {
           <${node.id}> ?p ?o .
           OPTIONAL {
-            << <${node.id}> ?p ?o >> rdfstar:source ?internalSource .
+            << <${node.id}> ?p ?o >> prov:wasDerivedFrom ?source .
           }
           OPTIONAL {
-            << <${node.id}> ?p ?o >> rdfstar:confidence ?internalConf .
+            << <${node.id}> ?p ?o >> prov:value ?confidence .
           }
           OPTIONAL {
-            << <${node.id}> ?p ?o >> prov:wasDerivedFrom ?provSource .
-          }
-          OPTIONAL {
-            << <${node.id}> ?p ?o >> prov:value ?provValue .
-          }
-          OPTIONAL {
-            << <${node.id}> ?p ?o >> prov:generatedAtTime ?provTime .
+            << <${node.id}> ?p ?o >> prov:generatedAtTime ?timestamp .
           }
           OPTIONAL {
             << <${node.id}> ?p ?o >> ?metaPred ?metaVal .
-            FILTER(?metaPred != rdfstar:source && ?metaPred != rdfstar:confidence 
-                   && ?metaPred != prov:wasDerivedFrom && ?metaPred != prov:value 
+            FILTER(?metaPred != prov:wasDerivedFrom && ?metaPred != prov:value 
                    && ?metaPred != prov:generatedAtTime)
           }
-          BIND(COALESCE(?internalSource, ?provSource) AS ?source)
-          BIND(COALESCE(?internalConf, ?provValue) AS ?confidence)
-          BIND(?provTime AS ?timestamp)
         }
       `
       const response = await fetchJson(`/repositories/${currentRepo}/sparql`, {
@@ -862,7 +892,6 @@ function App() {
       // Query for RDF-Star annotations (statements about statements)
       const annotationsQuery = `
         PREFIX prov: <http://www.w3.org/ns/prov#>
-        PREFIX rdfstar: <http://rdf-starbase.dev/>
         
         SELECT ?innerS ?innerP ?innerO ?annPred ?annVal WHERE {
           << ?innerS ?innerP ?innerO >> ?annPred ?annVal .
@@ -1325,6 +1354,7 @@ function App() {
             onSelectRepo={(name) => { setRepoLoading(true); setCurrentRepo(name) }}
             repoLoading={repoLoading}
             onRefreshRepos={loadRepositories}
+            onRefreshStats={refreshAllStats}
             onOpenImport={() => setShowImportModal(true)}
             theme={theme}
           />
