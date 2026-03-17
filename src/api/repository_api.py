@@ -654,13 +654,42 @@ def create_repository_router(
                     "success": True,
                 }
             elif isinstance(result, pl.DataFrame):
-                # SELECT query
-                return {
-                    "type": "select",
-                    "count": len(result),
-                    "columns": result.columns,
-                    "results": dataframe_to_records(result),
-                }
+                # Detect query form to return the correct type.
+                # Strip PREFIX declarations to find the query keyword.
+                q_body = request.query.strip()
+                while q_body.upper().startswith("PREFIX"):
+                    # Skip past the prefix line
+                    nl = q_body.find("\n")
+                    if nl == -1:
+                        break
+                    q_body = q_body[nl + 1:].strip()
+                q_upper = q_body.upper()
+
+                if q_upper.startswith("DESCRIBE"):
+                    # Return only subject/predicate/object for DESCRIBE
+                    spo_cols = [c for c in ["subject", "predicate", "object"] if c in result.columns]
+                    clean = result.select(spo_cols) if spo_cols else result
+                    return {
+                        "type": "describe",
+                        "count": len(clean),
+                        "columns": clean.columns,
+                        "triples": dataframe_to_records(clean),
+                    }
+                elif q_upper.startswith("CONSTRUCT"):
+                    return {
+                        "type": "construct",
+                        "count": len(result),
+                        "columns": result.columns,
+                        "triples": dataframe_to_records(result),
+                    }
+                else:
+                    # SELECT query
+                    return {
+                        "type": "select",
+                        "count": len(result),
+                        "columns": result.columns,
+                        "results": dataframe_to_records(result),
+                    }
             else:
                 return {"type": "unknown", "result": str(result)}
                 

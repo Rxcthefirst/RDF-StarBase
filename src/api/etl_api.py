@@ -490,7 +490,7 @@ def run_etl_job(
                 try:
                     temp_path_obj = Path(temp_path)
                     file_uri = temp_path_obj.as_uri()
-                    count = store.load_graph(file_uri)
+                    count = store.load_graph(file_uri, source="starchart:etl_job")
                     repo_manager.save(target_repo)
                     loaded = True
                 finally:
@@ -790,7 +790,10 @@ async def convert_data(
                         temp_path_obj = Path(temp_path)
                         file_uri = temp_path_obj.as_uri()  # Handles Windows/Unix correctly
                         
-                        count = store.load_graph(file_uri)
+                        count = store.load_graph(
+                            file_uri,
+                            source=f"starchart:{data_file.filename}",
+                        )
                         repo_manager.save(target_repo)
                         loaded = True
                         

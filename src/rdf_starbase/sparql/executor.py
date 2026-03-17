@@ -1068,7 +1068,12 @@ class SPARQLExecutor:
         for tid in all_ids:
             term = td.lookup(tid)
             if term is not None:
-                id_to_str[tid] = term.lex
+                # Preserve language tags for language-tagged literals
+                # so the frontend can distinguish "value"@en from "value"@ja
+                if term.lang:
+                    id_to_str[tid] = f'"{term.lex}"@{term.lang}'
+                else:
+                    id_to_str[tid] = term.lex
 
         if not id_to_str:
             return df

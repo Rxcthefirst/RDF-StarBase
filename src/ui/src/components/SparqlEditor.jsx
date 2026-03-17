@@ -1,5 +1,9 @@
 import { useRef, useEffect } from 'react'
-import Editor from '@monaco-editor/react'
+import Editor, { loader } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor'
+
+// Use locally bundled Monaco instead of CDN (avoids "Loading..." in Docker/offline)
+loader.config({ monaco })
 
 // SPARQL language definition for Monaco
 const SPARQL_LANGUAGE = {
@@ -138,6 +142,12 @@ export default function SparqlEditor({
 }) {
   const editorRef = useRef(null)
   const monacoRef = useRef(null)
+  const onExecuteRef = useRef(onExecute)
+
+  // Keep ref in sync so the editor action always calls the latest onExecute
+  useEffect(() => {
+    onExecuteRef.current = onExecute
+  }, [onExecute])
 
   const handleEditorWillMount = (monaco) => {
     // Register SPARQL language
@@ -224,7 +234,7 @@ export default function SparqlEditor({
       label: 'Execute Query',
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
       run: () => {
-        if (onExecute) onExecute()
+        if (onExecuteRef.current) onExecuteRef.current()
       }
     })
     
@@ -259,6 +269,12 @@ export default function SparqlEditor({
       onChange={onChange}
       beforeMount={handleEditorWillMount}
       onMount={handleEditorDidMount}
+      loading={
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-secondary, #888)', gap: '0.5rem' }}>
+          <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }} />
+          <span>Initializing editor...</span>
+        </div>
+      }
       options={{
         minimap: { enabled: false },
         fontSize: 14,

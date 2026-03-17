@@ -873,12 +873,38 @@ def create_app(store: Optional[TripleStore] = None, registry: Optional[Assertion
                     "success": True,
                 }
             elif isinstance(result, pl.DataFrame):
-                return {
-                    "type": "select",
-                    "count": len(result),
-                    "columns": result.columns,
-                    "results": dataframe_to_records(result),
-                }
+                # Detect query form to return the correct type.
+                q_body = request.query.strip()
+                while q_body.upper().startswith("PREFIX"):
+                    nl = q_body.find("\n")
+                    if nl == -1:
+                        break
+                    q_body = q_body[nl + 1:].strip()
+                q_upper = q_body.upper()
+
+                if q_upper.startswith("DESCRIBE"):
+                    spo_cols = [c for c in ["subject", "predicate", "object"] if c in result.columns]
+                    clean = result.select(spo_cols) if spo_cols else result
+                    return {
+                        "type": "describe",
+                        "count": len(clean),
+                        "columns": clean.columns,
+                        "triples": dataframe_to_records(clean),
+                    }
+                elif q_upper.startswith("CONSTRUCT"):
+                    return {
+                        "type": "construct",
+                        "count": len(result),
+                        "columns": result.columns,
+                        "triples": dataframe_to_records(result),
+                    }
+                else:
+                    return {
+                        "type": "select",
+                        "count": len(result),
+                        "columns": result.columns,
+                        "results": dataframe_to_records(result),
+                    }
             else:
                 return {"type": "unknown", "result": str(result)}
                 

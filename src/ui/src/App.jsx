@@ -50,6 +50,65 @@ const isURI = (value) => {
   return value.startsWith('http://') || value.startsWith('https://') || value.startsWith('urn:')
 }
 
+// Extract language tag from a literal value like "Hello"@en -> { text: "Hello", lang: "en" }
+const extractLangTag = (value) => {
+  if (!value || typeof value !== 'string') return { text: value, lang: null }
+  if (value.includes('@') && value.startsWith('"')) {
+    const match = value.match(/^"(.+)"@([\w-]+)$/)
+    if (match) return { text: match[1], lang: match[2].toLowerCase() }
+  }
+  return { text: value, lang: null }
+}
+
+// Detect the script/language of a text string from its Unicode character ranges
+const detectScript = (text) => {
+  if (!text || typeof text !== 'string') return 'unknown'
+  for (const ch of text) {
+    const code = ch.codePointAt(0)
+    if (code >= 0x3040 && code <= 0x30FF) return 'ja'  // Hiragana + Katakana
+    if (code >= 0x31F0 && code <= 0x31FF) return 'ja'  // Katakana Extensions
+    if (code >= 0x4E00 && code <= 0x9FFF) return 'zh'  // CJK Unified Ideographs (also used in ja)
+    if (code >= 0xAC00 && code <= 0xD7AF) return 'ko'  // Hangul Syllables
+    if (code >= 0x0400 && code <= 0x04FF) return 'ru'  // Cyrillic
+    if (code >= 0x0600 && code <= 0x06FF) return 'ar'  // Arabic
+    if (code >= 0x0E00 && code <= 0x0E7F) return 'th'  // Thai
+    if (code >= 0x0900 && code <= 0x097F) return 'hi'  // Devanagari
+    if ((code >= 0x0041 && code <= 0x007A) ||           // Basic Latin
+        (code >= 0x00C0 && code <= 0x024F)) return 'en' // Latin Extended
+  }
+  return 'en' // Default to Latin/English
+}
+
+// Map of language preference -> compatible detected scripts
+const LANG_SCRIPT_MAP = {
+  en: ['en'], de: ['en'], fr: ['en'], es: ['en'], it: ['en'], pt: ['en'], nl: ['en'],
+  ja: ['ja', 'zh'], zh: ['zh'], ko: ['ko'], ar: ['ar'], ru: ['ru'],
+}
+
+// Pick the best label from a list of { text, lang, raw } entries based on preferred language
+const pickBestLabel = (labels, preferredLang = 'en') => {
+  if (!labels || labels.length === 0) return null
+  if (labels.length === 1) return labels[0].text
+  const pref = preferredLang.toLowerCase()
+  
+  // 1. Exact @lang tag match
+  const exact = labels.find(l => l.lang === pref)
+  if (exact) return exact.text
+  // 2. Prefix @lang match (e.g., 'en' matches 'en-us')
+  const prefix = labels.find(l => l.lang && l.lang.startsWith(pref))
+  if (prefix) return prefix.text
+  
+  // 3. Script detection for labels without @lang tags
+  const compatScripts = LANG_SCRIPT_MAP[pref] || ['en']
+  const scriptMatch = labels.find(l => !l.lang && compatScripts.includes(detectScript(l.text)))
+  if (scriptMatch) return scriptMatch.text
+  
+  // 4. Fallback: no-lang entry with Latin script, then first entry
+  const latin = labels.find(l => !l.lang && detectScript(l.text) === 'en')
+  if (latin) return latin.text
+  return labels[0].text
+}
+
 // Format a value for display - handles typed literals
 const formatValue = (value) => {
   if (!value) return ''
@@ -70,7 +129,7 @@ const formatValue = (value) => {
   
   // Handle language-tagged literals like "Hello"@en
   if (value.includes('@') && value.startsWith('"')) {
-    const match = value.match(/^"(.+)"@(\w+)$/)
+    const match = value.match(/^"(.+)"@([\w-]+)$/)
     if (match) return match[1]
   }
   
@@ -82,6 +141,38 @@ const formatValue = (value) => {
   
   return value
 }
+
+// Format a value for display AND show language tag badge
+const formatValueWithLang = (value) => {
+  if (!value || typeof value !== 'string') return { display: formatValue(value), lang: null }
+  const { text, lang } = extractLangTag(value)
+  if (lang) return { display: text, lang }
+  return { display: formatValue(value), lang: null }
+}
+
+// Well-known OWL/RDFS/SKOS annotation properties
+const ANNOTATION_PROPERTY_URIS = new Set([
+  'http://www.w3.org/2000/01/rdf-schema#label',
+  'http://www.w3.org/2000/01/rdf-schema#comment',
+  'http://www.w3.org/2000/01/rdf-schema#seeAlso',
+  'http://www.w3.org/2000/01/rdf-schema#isDefinedBy',
+  'http://www.w3.org/2004/02/skos/core#prefLabel',
+  'http://www.w3.org/2004/02/skos/core#altLabel',
+  'http://www.w3.org/2004/02/skos/core#hiddenLabel',
+  'http://www.w3.org/2004/02/skos/core#definition',
+  'http://www.w3.org/2004/02/skos/core#note',
+  'http://www.w3.org/2004/02/skos/core#scopeNote',
+  'http://www.w3.org/2004/02/skos/core#example',
+  'http://www.w3.org/2004/02/skos/core#changeNote',
+  'http://www.w3.org/2004/02/skos/core#editorialNote',
+  'http://www.w3.org/2004/02/skos/core#historyNote',
+  'http://purl.org/dc/terms/title',
+  'http://purl.org/dc/terms/description',
+  'http://purl.org/dc/elements/1.1/title',
+  'http://purl.org/dc/elements/1.1/description',
+  'http://www.w3.org/2002/07/owl#versionInfo',
+  'http://www.w3.org/2002/07/owl#deprecated',
+])
 
 // Default colors for node types (Neo4j-inspired palette)
 const DEFAULT_TYPE_COLORS = [
@@ -198,7 +289,8 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles,
       .velocityDecay(0.4)  // Higher friction = less floaty
     
     // Arrow marker
-    svg.append('defs').append('marker')
+    const defs = svg.append('defs')
+    defs.append('marker')
       .attr('id', 'arrow')
       .attr('viewBox', '0 -5 10 10')
       .attr('refX', 28)
@@ -209,16 +301,138 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles,
       .append('path')
       .attr('fill', isDark ? '#89b4fa' : '#1e66f5')
       .attr('d', 'M0,-5L10,0L0,5')
+
+    // Smaller arrow for self-loop edges (shorter refX so it's visible)
+    defs.append('marker')
+      .attr('id', 'arrow-loop')
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 6)
+      .attr('refY', 0)
+      .attr('markerWidth', 5)
+      .attr('markerHeight', 5)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('fill', isDark ? '#89b4fa' : '#1e66f5')
+      .attr('d', 'M0,-5L10,0L0,5')
     
-    // Links
+    // ── Detect parallel / bidirectional edges and assign curve offsets ──
+    // For each unordered pair of nodes, count how many edges exist between
+    // them and assign each edge a curve offset so they fan out instead of
+    // overlapping.  Single edges stay straight (offset = 0).
+    // Self-loops are flagged separately.
+    const pairCounts = {}   // "A|||B" -> total count
+    const pairIndexes = {}  // "A|||B" -> next index to assign
+    edges.forEach(e => {
+      const srcId = e.source?.id ?? e.source
+      const tgtId = e.target?.id ?? e.target
+      e._isSelfLoop = (srcId === tgtId)
+      const key = [srcId, tgtId].sort().join('|||')
+      pairCounts[key] = (pairCounts[key] || 0) + 1
+    })
+    // Reset index counters
+    Object.keys(pairCounts).forEach(k => { pairIndexes[k] = 0 })
+    // Track self-loop index per node for stacking multiple self-loops
+    const selfLoopIndexes = {}
+    edges.forEach(e => {
+      const srcId = e.source?.id ?? e.source
+      const tgtId = e.target?.id ?? e.target
+      if (e._isSelfLoop) {
+        selfLoopIndexes[srcId] = (selfLoopIndexes[srcId] || 0)
+        e._selfLoopIndex = selfLoopIndexes[srcId]++
+        return
+      }
+      const key = [srcId, tgtId].sort().join('|||')
+      const total = pairCounts[key]
+      const idx = pairIndexes[key]++
+      if (total === 1) {
+        e._curveOffset = 0
+      } else {
+        // Fan out symmetrically: offsets like -40, 40 for 2 edges; -40, 0, 40 for 3, etc.
+        const spacing = 50
+        e._curveOffset = (idx - (total - 1) / 2) * spacing
+        // Flip sign when the edge runs in the "reverse" sorted direction
+        if (srcId > tgtId) e._curveOffset *= -1
+      }
+    })
+    
+    // Helper: generate a SVG path `d` attribute for each edge.
+    // Straight line when offset === 0, quadratic bézier for parallel edges,
+    // cubic bézier loop for self-references.
+    const SELF_LOOP_RADIUS = 35
+    const linkPath = (d) => {
+      const sx = d.source.x, sy = d.source.y
+      const tx = d.target.x, ty = d.target.y
+
+      // ── Self-loop: draw a loop above the node ──
+      if (d._isSelfLoop) {
+        const r = SELF_LOOP_RADIUS + (d._selfLoopIndex || 0) * 20
+        // Start and end points offset slightly left/right of the node top
+        const x1 = sx - 10, y1 = sy - 20
+        const x2 = sx + 10, y2 = sy - 20
+        // Two control points above the node forming a nice loop
+        const cx1 = sx - r - 10, cy1 = sy - r - 25
+        const cx2 = sx + r + 10, cy2 = sy - r - 25
+        return `M${x1},${y1}C${cx1},${cy1} ${cx2},${cy2} ${x2},${y2}`
+      }
+
+      if (d._curveOffset === 0) {
+        return `M${sx},${sy}L${tx},${ty}`
+      }
+      // Perpendicular control point
+      const mx = (sx + tx) / 2
+      const my = (sy + ty) / 2
+      const dx = tx - sx
+      const dy = ty - sy
+      const len = Math.sqrt(dx * dx + dy * dy) || 1
+      // Unit perpendicular
+      const px = -dy / len
+      const py = dx / len
+      const cx = mx + px * d._curveOffset
+      const cy = my + py * d._curveOffset
+      return `M${sx},${sy}Q${cx},${cy} ${tx},${ty}`
+    }
+
+    // Helper: midpoint along a link path (for edge labels)
+    const linkMidpoint = (d) => {
+      const sx = d.source.x, sy = d.source.y
+      const tx = d.target.x, ty = d.target.y
+
+      // Self-loop label: place at the apex of the loop
+      if (d._isSelfLoop) {
+        const r = SELF_LOOP_RADIUS + (d._selfLoopIndex || 0) * 20
+        return { x: sx, y: sy - r - 30 }
+      }
+
+      if (d._curveOffset === 0) {
+        return { x: (sx + tx) / 2, y: (sy + ty) / 2 }
+      }
+      // Quadratic bézier at t=0.5
+      const mx = (sx + tx) / 2
+      const my = (sy + ty) / 2
+      const dx = tx - sx
+      const dy = ty - sy
+      const len = Math.sqrt(dx * dx + dy * dy) || 1
+      const px = -dy / len
+      const py = dx / len
+      const cx = mx + px * d._curveOffset
+      const cy = my + py * d._curveOffset
+      // B(0.5) = 0.25*S + 0.5*C + 0.25*T
+      return {
+        x: 0.25 * sx + 0.5 * cx + 0.25 * tx,
+        y: 0.25 * sy + 0.5 * cy + 0.25 * ty,
+      }
+    }
+
+    // Links (paths instead of lines for bézier support)
     const link = g.append('g')
-      .selectAll('line')
+      .selectAll('path')
       .data(edges)
-      .join('line')
+      .join('path')
+      .attr('fill', 'none')
       .attr('stroke', isDark ? '#585b70' : '#9ca0b0')
       .attr('stroke-width', 2)
       .attr('stroke-opacity', 0.6)
-      .attr('marker-end', 'url(#arrow)')
+      .attr('marker-end', d => d._isSelfLoop ? 'url(#arrow-loop)' : 'url(#arrow)')
       .on('mouseover', (event, d) => {
         setTooltip({ x: event.pageX + 10, y: event.pageY + 10, content: d.predicate })
         d3.select(event.currentTarget).attr('stroke-opacity', 1).attr('stroke-width', 3)
@@ -245,15 +459,11 @@ function GraphView({ nodes, edges, onNodeClick, onEdgeClick, theme, graphStyles,
     
     // Update positions function (used during simulation and after)
     const updatePositions = () => {
-      link
-        .attr('x1', d => d.source.x)
-        .attr('y1', d => d.source.y)
-        .attr('x2', d => d.target.x)
-        .attr('y2', d => d.target.y)
+      link.attr('d', d => linkPath(d))
       
       edgeLabels
-        .attr('x', d => (d.source.x + d.target.x) / 2)
-        .attr('y', d => (d.source.y + d.target.y) / 2 - 8)
+        .attr('x', d => linkMidpoint(d).x)
+        .attr('y', d => linkMidpoint(d).y - 8)
       
       node.attr('transform', d => `translate(${d.x},${d.y})`)
     }
@@ -517,7 +727,8 @@ function App() {
   const [nodeProperties, setNodeProperties] = useState(null)
   const [nodeAnnotations, setNodeAnnotations] = useState(null) // RDF-Star annotations
   const [detailsPanel, setDetailsPanel] = useState(false) // Right panel visibility
-  const [expandedSections, setExpandedSections] = useState({ objectProps: true, dataProps: true, provenance: false, annotations: false, metadata: false, styling: true })
+  const [expandedSections, setExpandedSections] = useState({ objectProps: true, dataProps: true, annotationProps: true, provenance: false, annotations: false, metadata: false, styling: true })
+  const [preferredLanguage, setPreferredLanguage] = useState(() => localStorage.getItem('rdf-starbase-lang') || 'en')
   const [expandedProps, setExpandedProps] = useState({}) // Track expanded property accordions for competing claims
   const [showQueryHelpers, setShowQueryHelpers] = useState(false) // Query helpers panel
   
@@ -642,7 +853,9 @@ function App() {
     const edgeList = []
     const nodeTypes = {} // { nodeId: Set<typeUri> }
     const nodeData = {}  // { nodeId: { propUri: value } }
+    const nodeLabelCandidates = {} // { nodeId: [ { text, lang, raw } ] }
     const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+    const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label'
     const hasTriples = columns.includes('s') && columns.includes('p') && columns.includes('o')
     
     if (hasTriples) {
@@ -658,6 +871,13 @@ function App() {
         if (p === RDF_TYPE || p.endsWith('#type') || p.endsWith('/type')) {
           if (!nodeTypes[s]) nodeTypes[s] = new Set()
           nodeTypes[s].add(o)
+        }
+        
+        // Track rdfs:label candidates with language tags for display
+        if (p === RDFS_LABEL || p.endsWith('#label')) {
+          if (!nodeLabelCandidates[s]) nodeLabelCandidates[s] = []
+          const { text, lang } = extractLangTag(o)
+          nodeLabelCandidates[s].push({ text: text.replace(/^"|"$/g, ''), lang, raw: o })
         }
         
         // Track data properties (non-URI objects) for label options
@@ -698,16 +918,22 @@ function App() {
       nodeData: nodeData,
     }))
     
+    // Resolve best label per node based on preferred language
+    const nodeLabels = {}
+    for (const [nodeId, candidates] of Object.entries(nodeLabelCandidates)) {
+      nodeLabels[nodeId] = pickBestLabel(candidates, preferredLanguage)
+    }
+    
     return {
       nodes: [...nodeSet].map(id => ({ 
         id, 
-        label: getLocalName(id),
+        label: nodeLabels[id] || getLocalName(id),
         types: nodeTypesArray[id] || [],
         data: nodeData[id] || {},
       })),
       edges: edgeList
     }
-  }, [])
+  }, [preferredLanguage])
 
   // Execute SPARQL
   const executeSparql = useCallback(async (query = null) => {
@@ -732,10 +958,25 @@ function App() {
         const { nodes, edges } = buildGraph(result.results, result.columns)
         setGraphNodes(nodes)
         setGraphEdges(edges)
-        // Don't auto-switch view - respect user's current view choice
-      } else if (result.type === 'construct' && result.triples) {
+        // Fetch types for all nodes (including object property targets whose rdf:type wasn't in results)
+        fetchNodeTypes(nodes)
+      } else if ((result.type === 'construct' || result.type === 'describe') && result.triples) {
         const nodeSet = new Set()
         const edgeList = []
+        const tripleLabelCandidates = {} // { nodeId: [ { text, lang } ] }
+        const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label'
+        // First pass: collect rdfs:label candidates with language tags
+        for (const t of result.triples) {
+          if (t.predicate === RDFS_LABEL || t.predicate.endsWith('#label')) {
+            if (!tripleLabelCandidates[t.subject]) tripleLabelCandidates[t.subject] = []
+            const { text, lang } = extractLangTag(t.object)
+            tripleLabelCandidates[t.subject].push({ text: text.replace(/^"|"$/g, ''), lang, raw: t.object })
+          }
+        }
+        const tripleLabels = {}
+        for (const [nodeId, candidates] of Object.entries(tripleLabelCandidates)) {
+          tripleLabels[nodeId] = pickBestLabel(candidates, preferredLanguage)
+        }
         for (const t of result.triples) {
           nodeSet.add(t.subject)
           if (t.object.startsWith('http') || t.object.startsWith('urn:')) {
@@ -743,8 +984,11 @@ function App() {
             edgeList.push({ source: t.subject, target: t.object, predicate: t.predicate, label: getLocalName(t.predicate) })
           }
         }
-        setGraphNodes([...nodeSet].map(id => ({ id, label: getLocalName(id) })))
+        const freshNodes = [...nodeSet].map(id => ({ id, label: tripleLabels[id] || getLocalName(id) }))
+        setGraphNodes(freshNodes)
         setGraphEdges(edgeList)
+        // Fetch types for all nodes from construct/describe results
+        fetchNodeTypes(freshNodes)
       } else {
         setGraphNodes([])
         setGraphEdges([])
@@ -759,7 +1003,106 @@ function App() {
     } finally {
       setExecuting(false)
     }
-  }, [currentRepo, sparqlQuery, buildGraph, loadStats, loadRepositories])
+  }, [currentRepo, sparqlQuery, buildGraph, loadStats, loadRepositories, preferredLanguage, fetchNodeTypes])
+
+  // Fetch rdf:type for all graph nodes to ensure proper styling
+  // This runs after graph is built to catch nodes whose type triples weren't in the original result set
+  // Fetch rdf:type and rdfs:label for all graph nodes to ensure proper styling and labeling
+  // This runs after graph is built to catch nodes whose type/label triples weren't in the original result set
+  const fetchNodeTypes = useCallback(async (nodes) => {
+    if (!currentRepo || !nodes || nodes.length === 0) return
+    
+    // Only query for URI nodes (not literals)
+    const uriNodes = nodes.filter(n => n.id.startsWith('http') || n.id.startsWith('urn:'))
+    if (uriNodes.length === 0) return
+    
+    // Build VALUES clause for all nodes
+    const valuesClause = uriNodes.map(n => `<${n.id}>`).join(' ')
+    
+    // Run type and label queries in parallel (separate queries to avoid Polars UNION type issues)
+    const typeQuery = `SELECT ?s ?type WHERE { VALUES ?s { ${valuesClause} } ?s a ?type }`
+    const labelQuery = `SELECT ?s ?label WHERE { VALUES ?s { ${valuesClause} } ?s <http://www.w3.org/2000/01/rdf-schema#label> ?label }`
+    
+    try {
+      const [typeResponse, labelResponse] = await Promise.all([
+        fetchJson(`/repositories/${currentRepo}/sparql`, {
+          method: 'POST',
+          body: JSON.stringify({ query: typeQuery }),
+        }),
+        fetchJson(`/repositories/${currentRepo}/sparql`, {
+          method: 'POST',
+          body: JSON.stringify({ query: labelQuery }),
+        }),
+      ])
+      
+      // Build nodeTypes map
+      const nodeTypes = {}
+      const allTypes = new Set()
+      for (const row of (typeResponse.results || [])) {
+        if (!row.s || !row.type) continue
+        if (!nodeTypes[row.s]) nodeTypes[row.s] = []
+        if (!nodeTypes[row.s].includes(row.type)) {
+          nodeTypes[row.s].push(row.type)
+        }
+        allTypes.add(row.type)
+      }
+      
+      // Build label candidates for language-aware selection
+      const labelCandidates = {} // { nodeId: [ { text, lang } ] }
+      for (const row of (labelResponse.results || [])) {
+        if (!row.s || !row.label) continue
+        if (!labelCandidates[row.s]) labelCandidates[row.s] = []
+        const { text, lang } = extractLangTag(row.label)
+        const cleanText = text.replace(/^"|"$/g, '')
+        // Avoid duplicates
+        if (!labelCandidates[row.s].some(l => l.text === cleanText && l.lang === lang)) {
+          labelCandidates[row.s].push({ text: cleanText, lang })
+        }
+      }
+      
+      // Resolve best labels
+      const bestLabels = {}
+      for (const [nodeId, candidates] of Object.entries(labelCandidates)) {
+        bestLabels[nodeId] = pickBestLabel(candidates, preferredLanguage)
+      }
+      
+      // Update graph nodes with types and labels
+      setGraphNodes(prev => prev.map(n => ({
+        ...n,
+        types: nodeTypes[n.id] || n.types || [],
+        label: bestLabels[n.id] || n.label || getLocalName(n.id),
+      })))
+      
+      // Update available types and graph styles
+      setAvailableTypes(prev => {
+        const combined = new Set([...prev, ...allTypes])
+        return [...combined]
+      })
+      setGraphStyles(prev => ({
+        ...prev,
+        nodeTypes: { ...prev.nodeTypes, ...nodeTypes },
+      }))
+    } catch (err) {
+      console.error('Failed to fetch node types:', err)
+    }
+  }, [currentRepo, preferredLanguage])
+
+  // Re-build graph labels when preferred language changes
+  const langInitRef = useRef(true)
+  useEffect(() => {
+    // Skip the initial render — graph is already built with the initial language
+    if (langInitRef.current) {
+      langInitRef.current = false
+      return
+    }
+    if (queryResults?.type === 'select' && queryResults?.results) {
+      const { nodes, edges } = buildGraph(queryResults.results, queryResults.columns)
+      setGraphNodes(nodes)
+      setGraphEdges(edges)
+      // Re-fetch labels with new language preference
+      fetchNodeTypes(nodes)
+    }
+  }, [preferredLanguage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize
   useEffect(() => {
@@ -999,11 +1342,29 @@ function App() {
       }
       
       // Create fresh node objects (D3 will add x, y, etc.)
-      const freshNodes = [...nodeIds].map(id => ({ id, label: getLocalName(id) }))
+      // Preserve rdfs:label from existing nodes and extract from new triples
+      const RDFS_LABEL_URI = 'http://www.w3.org/2000/01/rdf-schema#label'
+      const existingLabels = {}
+      graphNodes.forEach(n => { if (n.label && n.label !== getLocalName(n.id)) existingLabels[n.id] = n.label })
+      // Collect label candidates from new triples for language-aware selection
+      const expandLabelCandidates = {}
+      for (const row of results) {
+        if (row.p === RDFS_LABEL_URI || row.p.endsWith('#label')) {
+          if (!expandLabelCandidates[row.s]) expandLabelCandidates[row.s] = []
+          const { text, lang } = extractLangTag(row.o)
+          expandLabelCandidates[row.s].push({ text: text.replace(/^"|"$/g, ''), lang, raw: row.o })
+        }
+      }
+      for (const [nodeId, candidates] of Object.entries(expandLabelCandidates)) {
+        existingLabels[nodeId] = pickBestLabel(candidates, preferredLanguage)
+      }
+      const freshNodes = [...nodeIds].map(id => ({ id, label: existingLabels[id] || getLocalName(id) }))
       
       // Update graph state with fresh arrays
       setGraphNodes(freshNodes)
       setGraphEdges(newEdges)
+      // Fetch types for expanded nodes
+      fetchNodeTypes(freshNodes)
       
       // Update query results to include new triples
       if (queryResults && queryResults.results) {
@@ -1021,7 +1382,7 @@ function App() {
     } catch (err) {
       console.error('Failed to expand node:', err)
     }
-  }, [currentRepo, graphNodes, graphEdges, queryResults])
+  }, [currentRepo, graphNodes, graphEdges, queryResults, preferredLanguage, fetchNodeTypes])
 
   // Check if a URI is already in the graph
   const isNodeInGraph = useCallback((uri) => {
@@ -1287,12 +1648,14 @@ function App() {
             >
               <BrainIcon size={16} /> AI Grounding
             </button>
+            {/* Mapper tab hidden until feature is officially released
             <button 
               className={`tab-btn ${activeTab === 'mapper' ? 'active' : ''}`}
               onClick={() => setActiveTab('mapper')}
             >
               <MapIcon size={16} /> Mapper
             </button>
+            */}
           </div>
         </div>
 
@@ -1482,8 +1845,35 @@ function App() {
                 {queryResults.type === 'ask' && (queryResults.result ? '✓ TRUE' : '✗ FALSE')}
                 {queryResults.type === 'update' && `${queryResults.affected || 0} affected`}
                 {queryResults.type === 'construct' && `${queryResults.triples?.length || 0} triples`}
+                {queryResults.type === 'describe' && `${queryResults.triples?.length || 0} triples`}
               </div>
             )}
+
+            {/* Language preference selector */}
+            <div className="lang-selector" title="Preferred label language">
+              <GlobeIcon size={14} />
+              <select 
+                value={preferredLanguage} 
+                onChange={(e) => {
+                  const lang = e.target.value
+                  setPreferredLanguage(lang)
+                  localStorage.setItem('rdf-starbase-lang', lang)
+                }}
+              >
+                <option value="en">EN</option>
+                <option value="de">DE</option>
+                <option value="fr">FR</option>
+                <option value="es">ES</option>
+                <option value="it">IT</option>
+                <option value="pt">PT</option>
+                <option value="nl">NL</option>
+                <option value="ja">JA</option>
+                <option value="zh">ZH</option>
+                <option value="ko">KO</option>
+                <option value="ar">AR</option>
+                <option value="ru">RU</option>
+              </select>
+            </div>
 
             <div className="panel-toggles">
               <button 
@@ -1543,6 +1933,13 @@ function App() {
                     </div>
                   )}
                   {queryResults.type === 'construct' && (
+                    <ResultsTable 
+                      results={queryResults.triples?.map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object }))} 
+                      columns={['subject', 'predicate', 'object']} 
+                      theme={theme}
+                    />
+                  )}
+                  {queryResults.type === 'describe' && (
                     <ResultsTable 
                       results={queryResults.triples?.map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object }))} 
                       columns={['subject', 'predicate', 'object']} 
@@ -1743,9 +2140,83 @@ function App() {
                             )
                           })()}
 
+                          {/* Annotation Properties Accordion */}
+                          {(() => {
+                            const annotationProps = nodeProperties?.filter(p => !p.isObjectProperty && ANNOTATION_PROPERTY_URIS.has(p.predicate)) || []
+                            return annotationProps.length > 0 && (
+                              <div className="accordion-section">
+                                <button 
+                                  className={`accordion-header ${expandedSections.annotationProps ? 'expanded' : ''}`}
+                                  onClick={() => toggleSection('annotationProps')}
+                                >
+                                  <span>Annotation Properties</span>
+                                  <span className="accordion-count">{annotationProps.length}</span>
+                                  <span className="accordion-icon">{expandedSections.annotationProps ? '−' : '+'}</span>
+                                </button>
+                                {expandedSections.annotationProps && (
+                                  <div className="accordion-content">
+                                    <div className="properties-list">
+                                      {annotationProps.map((prop, i) => (
+                                        <div key={i} className={`property-item ${prop.hasCompetingClaims || prop.hasProvenance ? 'has-details' : ''}`}>
+                                          <div 
+                                            className="property-header"
+                                            onClick={() => (prop.hasCompetingClaims || prop.hasProvenance) && togglePropExpand(prop.predicate)}
+                                          >
+                                            <span className="prop-name" title={prop.predicate}>{getLocalName(prop.predicate)}</span>
+                                            <span className="prop-indicators">
+                                              {prop.hasProvenance && <span className="indicator prov-indicator" title="Has provenance">P</span>}
+                                              {prop.hasCompetingClaims && <span className="indicator claims-indicator" title="Competing claims">C</span>}
+                                            </span>
+                                            {(prop.hasCompetingClaims || prop.hasProvenance) && (
+                                              <span className="prop-expand">{expandedProps[prop.predicate] ? '−' : '+'}</span>
+                                            )}
+                                          </div>
+                                          <div className="property-values">
+                                            {prop.values.map((val, j) => {
+                                              const { display, lang } = formatValueWithLang(val.value)
+                                              return (
+                                                <div key={j} className="prop-value-row">
+                                                  <span className="prop-value literal-value" title={val.value}>
+                                                    {display}
+                                                  </span>
+                                                  {lang && <span className={`lang-badge ${lang === preferredLanguage ? 'preferred' : ''}`}>{lang}</span>}
+                                                </div>
+                                              )
+                                            })}
+                                          </div>
+                                          {expandedProps[prop.predicate] && (
+                                            <div className="property-details">
+                                              {prop.values.map((val, j) => (
+                                                val.sources.length > 0 && (
+                                                  <div key={j} className="value-provenance">
+                                                    <div className="val-header">"{formatValue(val.value)}"</div>
+                                                    {val.sources.map((src, k) => (
+                                                      <div key={k} className="source-info">
+                                                        {src.source && <div className="src-row"><span className="src-label">Source:</span> <span className="src-val">{getLocalName(src.source)}</span></div>}
+                                                        {src.confidence && <div className="src-row"><span className="src-label">Confidence:</span> <span className="src-val">{formatValue(src.confidence)}</span></div>}
+                                                        {src.timestamp && <div className="src-row"><span className="src-label">Time:</span> <span className="src-val">{new Date(src.timestamp).toLocaleString()}</span></div>}
+                                                        {src.metadata?.map((m, l) => (
+                                                          <div key={l} className="src-row"><span className="src-label">{getLocalName(m.predicate)}:</span> <span className="src-val">{formatValue(m.value)}</span></div>
+                                                        ))}
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                )
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })()}
+
                           {/* Data Properties Accordion */}
                           {(() => {
-                            const dataProps = nodeProperties?.filter(p => !p.isObjectProperty) || []
+                            const dataProps = nodeProperties?.filter(p => !p.isObjectProperty && !ANNOTATION_PROPERTY_URIS.has(p.predicate)) || []
                             return dataProps.length > 0 && (
                               <div className="accordion-section">
                                 <button 
@@ -1775,13 +2246,17 @@ function App() {
                                             )}
                                           </div>
                                           <div className="property-values">
-                                            {prop.values.map((val, j) => (
-                                              <div key={j} className="prop-value-row">
-                                                <span className="prop-value literal-value" title={val.value}>
-                                                  {formatValue(val.value)}
-                                                </span>
-                                              </div>
-                                            ))}
+                                            {prop.values.map((val, j) => {
+                                              const { display, lang } = formatValueWithLang(val.value)
+                                              return (
+                                                <div key={j} className="prop-value-row">
+                                                  <span className="prop-value literal-value" title={val.value}>
+                                                    {display}
+                                                  </span>
+                                                  {lang && <span className={`lang-badge ${lang === preferredLanguage ? 'preferred' : ''}`}>{lang}</span>}
+                                                </div>
+                                              )
+                                            })}
                                           </div>
                                           {expandedProps[prop.predicate] && (
                                             <div className="property-details">

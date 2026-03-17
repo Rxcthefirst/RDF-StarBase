@@ -646,6 +646,7 @@ class TripleStore:
         source_uri: str,
         graph_uri: Optional[str] = None,
         silent: bool = False,
+        source: Optional[str] = None,
     ) -> int:
         """
         Load RDF data from a URI into a graph.
@@ -659,6 +660,7 @@ class TripleStore:
             source_uri: URI to load data from
             graph_uri: Target graph (None for default graph)
             silent: If True, don't fail on errors
+            source: Explicit provenance label (overrides source_uri)
             
         Returns:
             Number of triples loaded
@@ -729,7 +731,7 @@ class TripleStore:
         
         # Add triples to the graph
         prov = ProvenanceContext(
-            source=source_uri,
+            source=source or source_uri,
             confidence=1.0,
             process="LOAD",
         )

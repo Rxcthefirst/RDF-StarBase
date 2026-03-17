@@ -2029,12 +2029,23 @@ class TripleStore:
         source_uri: str,
         graph_uri: Optional[str] = None,
         silent: bool = False,
+        source: Optional[str] = None,
     ) -> int:
         """
         Load RDF data from a URI into a graph.
         
         When pyoxigraph is available, uses Rust-based parsing for ~17x faster loading.
         Falls back to Python parser for RDF-Star content or when Oxigraph not available.
+
+        Args:
+            source_uri: File path or URI to load from.
+            graph_uri: Optional named graph IRI.
+            silent: If True, suppress errors and return 0.
+            source: Explicit provenance source label. When provided, this
+                overrides ``source_uri`` as the default provenance for
+                triples that lack their own RDF-Star annotation.  Use this
+                to record the original upload filename instead of a
+                temporary file path.
         """
         from pathlib import Path
         from urllib.parse import urlparse, unquote
@@ -2085,10 +2096,14 @@ class TripleStore:
                 sample = f.read(_SAMPLE_SIZE)
         has_rdfstar = '<<' in sample and '>>' in sample
         
+        # Provenance label: prefer the explicit source override,
+        # fall back to the (possibly temp-file) source_uri.
+        prov_source = source or source_uri
+
         # Try bulk_load_file fast path for supported formats
         if self._use_oxigraph_parsing and suffix in (".ttl", ".turtle", ".nt", ".ntriples") and not has_rdfstar:
             try:
-                return self.bulk_load_file(file_path, graph_uri=graph_uri, source=source_uri)
+                return self.bulk_load_file(file_path, graph_uri=graph_uri, source=prov_source)
             except Exception:
                 # Fall back to Python parser if bulk load fails
                 pass
@@ -2188,10 +2203,10 @@ class TripleStore:
             key = (triple.subject, triple.predicate, triple.object)
             if key in annotations:
                 ann = annotations[key]
-                source = ann.get("source", source_uri)
+                source = ann.get("source", prov_source)
                 confidence = ann.get("confidence", 1.0)
             else:
-                source = source_uri
+                source = prov_source
                 confidence = 1.0
             
             prov_key = (source, confidence)
@@ -2273,7 +2288,7 @@ class TripleStore:
         }
         ox_fmt_name = _FORMAT_MAP.get(suffix)
         if not ox_fmt_name:
-            return self.load_graph(str(file_path), graph_uri=graph_uri)
+            return self.load_graph(str(file_path), graph_uri=graph_uri, source=source)
 
         # --- quick RDF-Star check on 2 MB sample ------------------------
         _SAMPLE = 2 * 1024 * 1024
@@ -2287,7 +2302,7 @@ class TripleStore:
 
         if "<<" in sample and ">>" in sample:
             # contains RDF-Star – use general path for provenance
-            return self.load_graph(str(file_path), graph_uri=graph_uri)
+            return self.load_graph(str(file_path), graph_uri=graph_uri, source=source)
 
         # --- pyoxigraph availability -------------------------------------
         try:
@@ -2300,7 +2315,7 @@ class TripleStore:
             )
             rdf_format = getattr(RdfFormat, ox_fmt_name)
         except (ImportError, AttributeError):
-            return self.load_graph(str(file_path), graph_uri=graph_uri)
+            return self.load_graph(str(file_path), graph_uri=graph_uri, source=source)
 
         # --- pre-compute constants (once, not per chunk) -----------------
         td = self._term_dict
